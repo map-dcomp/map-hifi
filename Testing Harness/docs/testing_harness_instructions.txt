@@ -1,0 +1,52 @@
+Instructions for setting up and running the Testing Harness
+Authors: Alexander Wald
+Last Date Updated: 10/4/2017
+
+
+Installing the resource monitor:
+
+1. Install Python 3. You can use the install_python.sh script.
+
+2. Install the Python resource monitor. You can use the install_python-resmon.sh script.
+The resource monitor can be run with the "resmon" command. The Testing Harness uses the "resmon" command to start the resource monitor.
+
+
+
+
+Building Testing Harness on Ubuntu 16.04:
+
+1. cd Testing_Harness
+2. ./gradlew build
+
+
+
+Configuring the Testing Harness:
+The tester currently requires two external configuration files to perform a set of tests on a specified application.
+These two files are provided within the "Testing_Harness" Eclipse project directory.
+tester.config - specifies the commands and parameters for running the application service and clients, the command for running a resource monitor process,
+	which records data on the service processes, and the name of a [experiment csv file], which specifies parameters for each test to be performed
+	Commands and parameters in the file are comma separated.
+[experiment csv file] - the file that specifies the parameter values for performing each of the tests. The file contains one line per test.
+	Each line consists of a tab separated list of parameter values for its test.
+
+1. Make any desired changes to tester.config.
+
+2. Create or obtain a csv experiment file and modify tester.config to refer to the experiment file.
+
+
+
+
+Running the Testing Harness:
+
+1. Execute the following command:
+java -jar build/libs/tester.jar
+
+2. The Testing Harness will create an "experiments" folder, which contains one experiment folder (named based on the current time) for each set of tests defined in the [experiment csv file].
+The experiment folder will contain a separate folder for each test that is run.
+
+
+
+Eclipse setup:
+
+Initially and when the classpath changes execute:
+./gradlew eclipseClasspath

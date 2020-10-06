@@ -1,0 +1,39 @@
+- hosts: registry
+  become: yes
+  tasks:
+    - name: "Ensure /var/lib/map/sim-driver exists"
+      file:
+        path: /var/lib/map/sim-driver
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map       
+    - name: Install simulation driver jar file
+      copy:
+        src: sim-driver/sim-driver.jar
+        dest: /var/lib/map/sim-driver/sim-driver.jar
+        owner: map
+        mode: 0444       
+    - name: Install client log configuration
+      copy:
+        src: sim-driver/map-sim.logging.xml 
+        dest: /var/lib/map/sim-driver/map-sim.logging.xml 
+        owner: map
+        mode: 0444
+    - name: "Ensure /var/lib/map/sim-driver/scenario exists"
+      file:
+        path: /var/lib/map/sim-driver/scenario
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map       
+    - name: Install scenario
+      copy:
+        src: sim-driver/scenario/
+        dest: /var/lib/map/sim-driver/scenario/
+        owner: map
+        mode: 0444
+    - name: Install agent configuration
+      copy:
+        src: agent-configuration.json
+        dest: /var/lib/map/sim-driver/agent-configuration.json
+        owner: map
+        mode: 0444

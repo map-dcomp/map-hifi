@@ -1,0 +1,118 @@
+---
+- hosts: ncps:clients
+  become: yes
+  tasks:
+    - name: "Ensure /etc/systemd/system/docker.service.d exists"
+      file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: root
+
+    - name: Check for /usr/bin/dockerd
+      become: no
+      stat:
+        path: /usr/bin/dockerd
+      register: bin_dockerd
+    - name: symlink /usr/bin/dockerd to /usr/sbin
+      when: bin_dockerd.stat.exists == True
+      file:
+        src: /usr/bin/dockerd
+        dest: /usr/sbin/dockerd
+        state: link
+
+    - name: install daemon.json for docker
+      copy:
+        src: daemon.json
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: 0444
+        
+    - name: Configure docker service
+      copy:
+        src: docker-map.conf
+        dest: /etc/systemd/system/docker.service.d
+        owner: root
+        mode: 0664
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+    - name: reload docker
+      systemd:
+        name: docker
+        state: restarted
+      
+- hosts: ncps
+  become: yes
+  tasks:
+    - name: install agent systemd script
+      copy:
+        src: map-agent.service
+        dest: /etc/systemd/system
+        owner: root
+        mode: 0664
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+      
+- hosts: clients
+  become: yes
+  tasks:
+    - name: install client systemd script
+      copy:
+        src: client/map-client.service
+        dest: /etc/systemd/system
+        owner: root
+        mode: 0664
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+- hosts: registry
+  become: yes
+  tasks:
+    - name: install sim driver systemd script
+      copy:
+        src: sim-driver/sim-driver.service
+        dest: /etc/systemd/system
+        owner: root
+        mode: 0664
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+- hosts: all
+  become: yes
+  tasks:
+    - name: install background traffic systemd script
+      copy:
+        src: background-traffic-driver.service
+        dest: /etc/systemd/system
+        owner: root
+        mode: 0664
+
+    - name: install map system info systemd script
+      copy:
+        src: sysinfo/map_system_stats.service
+        dest: /etc/systemd/system
+        owner: root
+        mode: 0664
+      
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+      
+        
+- hosts: dns_servers
+  become: yes
+  tasks:
+    - name: install DNS systemd script
+      copy:
+        src: dns/map-dns.service
+        dest: /etc/systemd/system
+        owner: root
+        mode: 0664
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes

@@ -1,0 +1,38 @@
+Instructions for setting up and running the Face Recognition example application
+Authors: Alexander Wald, Jon Schewe
+Last Date Updated: 9/22/2017
+
+Running Face Recognition on Ubuntu 16.04:
+
+1. cd Face_Recognition
+2. ./gradlew build
+
+Running the server:
+
+1. Create a folder for the server to output images into.
+
+2. Execute a command with the following format:
+java -jar build/libs/FaceDetectionServer.jar [port] [image output folder]
+
+Example:
+java -jar build/libs/FaceDetectionServer.jar 7123 face_output
+
+
+Running a client:
+
+1. Create a folder to contain images that the client will send to the server for analysis.
+
+2. Place images into the folder. The client will find and send images at any level of depth in the file structure within the folder.
+
+3. Execute a command with the following format:
+java -jar build/libs/ImageSendingClient.jar [server address] [server port] [image input folder]
+
+Example:
+java -jar build/libs/ImageSendingClient.jar localHost 7123 face_input
+
+
+Eclipse setup:
+
+Initially and when the classpath changes execute:
+./gradlew eclipseClasspath
+

@@ -1,0 +1,39 @@
+rootProject.name = 'hifi'
+
+include ':P2Protelis'
+project(':P2Protelis').projectDir = new File("MAP-code/src/P2Protelis")
+
+include ':MAP-Agent'
+project(':MAP-Agent').projectDir = new File("MAP-code/src/MAP-Agent")
+
+include 'hifi-utils'
+include 'DnsServer'
+include 'SimulationDriver'
+
+include 'hifi-resmgr'
+include 'ClientDriver'
+include 'ClientPreStart'
+include 'stage-experiment'
+
+include 'BackgroundTraffic'
+
+include 'networked-file-store-server'
+project(':networked-file-store-server').projectDir = new File("simulation-applications/networked_file_store/networked-file-store-server")
+
+include 'networked-file-store-client-publisher'
+project(':networked-file-store-client-publisher').projectDir = new File("simulation-applications/networked_file_store/networked-file-store-client-publisher")
+
+include 'networked-file-store-client-query'
+project(':networked-file-store-client-query').projectDir = new File("simulation-applications/networked_file_store/networked-file-store-client-query")
+
+include 'simple-webserver'
+project(':simple-webserver').projectDir = new File("simulation-applications/simple-webserver")
+
+include 'Face_Recognition'
+project(':Face_Recognition').projectDir = new File("Face Recognition/Face_Recognition")
+
+include 'Testing_Harness'
+project(':Testing_Harness').projectDir = new File("Testing Harness/Testing_Harness")
+
+include 'fake-load-server'
+project(':fake-load-server').projectDir = new File("simulation-applications/fake-load-server")

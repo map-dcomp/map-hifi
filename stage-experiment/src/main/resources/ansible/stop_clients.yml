@@ -1,0 +1,10 @@
+---        
+- hosts: clients
+  become: yes
+  tasks:
+    - name: stop service
+      systemd:
+        name: map-client
+        state: stopped
+        enabled: yes
+        daemon-reload: yes

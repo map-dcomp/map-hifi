@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="warn">
+    <Appenders>
+        <!-- limit CONSOLE to be info -->
+        <Console name="CONSOLE" target="SYSTEM_OUT">
+            <PatternLayout pattern="%r [%t] %p %c %notEmpty{%x} %notEmpty{%X}- %m%n" />
+        </Console>
+
+        <RollingFile name="LOGFILE" filename="map-dns.log" filePattern="map-dns-%d{yyyyMMdd-HHmmss}.log">
+            <PatternLayout pattern="%r [%t] %p %c %notEmpty{%x} %notEmpty{%X}- %m%n" />
+             <Policies>
+                <OnStartupTriggeringPolicy />
+            </Policies>
+        </RollingFile>
+    </Appenders>
+
+    <Loggers>
+        <!-- stuff for debugging -->
+        <!-- 
+        <Logger name="com.bbn.protelis.networkresourcemanagement.NetworkServer" level="TRACE"/>
+        <Logger name="com.bbn.protelis.networkresourcemanagement.NetworkNeighbor" level="TRACE"/>
+        <Logger name="com.bbn.map.simulator.Simulation" level="TRACE"/>
+        <Logger name="com.bbn.map.simulator.SimResourceManager" level="TRACE"/>
+        <Logger name="com.bbn.map.Controller" level="TRACE"/>
+          -->
+	
+        <!-- 
+        <Logger name="debug" level="TRACE" />
+-->
+        <!-- 
+        <Logger name="com.bbn.map.rlg"
+            level="TRACE" />
+            -->
+            <!-- 
+        <Logger name="com.bbn.map.simulator.SimpleClock"
+            level="TRACE" />
+             -->
+        <!-- 
+                        <Logger name="com.bbn.protelis.networkresourcemanagement.NetworkServer" level="TRACE" />
+-->
+ 
+        <!-- end stuff for debugging -->
+
+
+          <Logger name="com.bbn" level="INFO" />
+
+        <Root level="WARN">
+            <AppenderRef ref="CONSOLE" />
+            <AppenderRef ref="LOGFILE" />
+        </Root>
+    </Loggers>
+
+</Configuration>

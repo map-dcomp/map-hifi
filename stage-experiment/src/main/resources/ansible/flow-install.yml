@@ -1,0 +1,40 @@
+---
+- hosts: ncps
+  become: yes
+
+  tasks:
+    - name: install packages
+      apt:
+        update_cache: yes
+        name: "{{ packages }}"
+      vars:
+        packages:
+        - nfdump
+        - fprobe
+
+    - name: fprobe interface
+      lineinfile:
+        path: /etc/default/fprobe
+        regexp: '^INTERFACE='
+        line: 'INTERFACE="any"'
+    - name: fprobe collector
+      lineinfile:
+        path: /etc/default/fprobe
+        regexp: '^FLOW_COLLECTOR='
+        line: 'FLOW_COLLECTOR="localhost:9995"'
+    - name: fprobe args
+      lineinfile:
+        path: /etc/default/fprobe
+        regexp: '^OTHER_ARGS='
+        line: 'OTHER_ARGS="-fip"'
+
+    - name: stop nfdump system service
+      systemd:
+        name: nfdump
+        state: stopped
+        enabled: no
+        
+    - name: restart fprobe
+      systemd:
+        name: fprobe
+        state: restarted

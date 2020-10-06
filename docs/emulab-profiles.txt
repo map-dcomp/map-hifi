@@ -1,0 +1,12 @@
+The file emulab-topology.py contains the code that should be pasted
+into the profile on Emulab to create the desired topology.
+
+When using an emulab profile you need to make sure to set the name of
+the experiment when you instantiate it. On step 3 of the instatiation
+there is the option to specify a name, you must put the name of the
+scenario there, otherwise the hosts file for ansible will point to the
+wrong systems and setup will fail.
+
+A profile defines a topology.
+Instantiating a profile creates an experiment.
+So one can have multiple experiments based off of the same profile.

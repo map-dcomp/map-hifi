@@ -1,0 +1,19 @@
+[
+  {
+    "startTime": 120000,
+    "serverDuration": 600000,
+    "networkDuration": 5000,
+    "numClients": 45,
+    "service": {
+      "group": "com.bbn",
+      "artifact": "database-query",
+      "version": "1"
+    },
+    "nodeLoad": {
+      "TASK_CONTAINERS": 0.2
+    },
+    "networkLoad": {
+      "DATARATE": 5.0
+    }
+  }
+]

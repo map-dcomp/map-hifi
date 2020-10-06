@@ -1,0 +1,130 @@
+import org.gradle.internal.os.OperatingSystem
+
+buildscript {
+  repositories {
+      jcenter()
+  }
+}
+
+// Plugins
+plugins {
+    //id 'com.dorongold.task-tree' version '1.3'
+    id 'com.github.johnrengelman.shadow'
+    id 'application'
+    id "com.gorylenko.gradle-git-properties" version "1.5.2"
+}
+
+def props = new Properties()
+file("../../MAP-code/src/P2Protelis/gradle.properties").withInputStream { props.load(it) }
+file("../../MAP-code/src/gradle.common.properties").withInputStream { props.load(it) }
+file("../../gradle.common.properties").withInputStream { props.load(it) }
+
+group = 'com.bbn.map.hifi.apps'
+version = props.getProperty("map_hifi_version")
+
+mainClassName = 'com.bbn.map.hifi.apps.simple_webserver.Main'
+
+
+description = """Simple Webserver"""
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+tasks.withType(JavaCompile) {
+	options.encoding = 'UTF-8'
+}
+
+repositories {
+ mavenLocal()
+ jcenter()
+}
+
+configurations {
+    providedRuntime
+    all {
+        exclude group: 'ch.qos.logback'
+    }    
+}
+
+// force spring boot to use a new log4j2, it wants 2.7 by default
+ext['log4j2.version'] = '2.8.2'
+
+dependencies {
+
+    implementation group: 'org.eclipse.jetty', name: 'jetty-server', version: jetty_version
+    implementation group: 'org.eclipse.jetty', name: 'jetty-io', version: jetty_version
+    implementation group: 'org.eclipse.jetty', name: 'jetty-util', version: jetty_version
+    implementation group: 'org.eclipse.jetty', name: 'jetty-servlet', version: jetty_version
+
+    implementation group: 'org.slf4j', name: 'slf4j-api', version: props.getProperty("slf4j_version")
+    implementation group: 'org.apache.logging.log4j', name: 'log4j-slf4j-impl', version: props.getProperty("log4j_version")
+    implementation group: 'org.apache.logging.log4j', name: 'log4j-core', version: props.getProperty("log4j_version")
+    
+    implementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: props.getProperty("jackson_version")
+    implementation group: 'com.fasterxml.jackson.datatype', name: 'jackson-datatype-guava', version: props.getProperty("jackson_version")
+    implementation group: 'com.fasterxml.jackson.module', name: 'jackson-module-parameter-names', version: props.getProperty("jackson_version")
+    implementation group: 'com.fasterxml.jackson.datatype', name: 'jackson-datatype-jdk8', version: props.getProperty("jackson_version")
+    implementation group: 'com.fasterxml.jackson.datatype', name: 'jackson-datatype-jsr310', version: props.getProperty("jackson_version")
+    
+    implementation group: 'com.diffplug.durian', name: 'durian', version: props.getProperty("durian_version")
+
+    implementation group: 'commons-cli', name: 'commons-cli', version: props.getProperty("commons_cli_version")
+	
+    implementation group: 'org.apache.commons', name: 'commons-csv', version: props.getProperty("commons_csv_version")
+	
+    implementation group: 'org.apache.commons', name: 'commons-lang3', version: '3.8.1'
+
+    implementation project(':networked-file-store-server')
+    implementation project(':hifi-utils')
+    
+    testImplementation group: 'junit', name: 'junit', version: props.getProperty("junit_version")
+    testImplementation group: 'org.hamcrest', name: 'hamcrest-library', version: props.getProperty("hamcrest_version")
+}
+
+eclipse {
+    classpath {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
+
+checkstyle {
+    config = resources.text.fromFile('style.xml', 'UTF-8')
+    showViolations = true
+    ignoreFailures = false
+    toolVersion = "8.10"
+}
+
+task sourceJar(type: Jar) {
+  classifier "sources"
+  from sourceSets.main.allJava
+}
+
+publishing {
+    repositories {
+        mavenLocal()
+    }
+    
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifact sourceJar
+        }
+    }
+}
+
+shadowJar {
+    classifier = 'executable'
+    
+    // for some reason including the Log4j2 dat file causes problems
+    // excluding the file causes log4j4 to scan for plugins and everything works 
+    exclude 'META-INF/org/apache/logging/log4j/core/config/plugins/Log4j2Plugins.dat'
+ }
+
+gitProperties {
+    gitPropertiesDir = "${buildDir}/resources/main/com/bbn/map/hifi/apps/simple_webserver"
+}
+
+spotbugs {
+  ignoreFailures = true
+  toolVersion = '3.1.12'
+}

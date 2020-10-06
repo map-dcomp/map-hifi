@@ -1,0 +1,6 @@
+---
+- hosts: ncps:clients
+  become: yes
+  tasks:
+    - name: remove all docker images
+      shell: docker image prune -a -f

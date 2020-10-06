@@ -1,0 +1,8 @@
+{
+  "region": "X",
+  "dns": true,
+  "pool": true,
+  "RLG": true,
+  "DCOP": true
+}
+

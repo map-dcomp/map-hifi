@@ -1,0 +1,29 @@
+---
+- hosts: ncps
+  become: yes
+
+  tasks:
+    - name: install pimd
+      apt:
+        update_cache: yes
+        name: pimd
+
+    - name: copy pimd defaults
+      copy:
+        src: pimd.standard.default
+        dest: /etc/default/pimd
+
+    - name: copy pimd configuration script
+      copy:
+        src: configure_pimd.py
+        dest: /etc/map/configure_pimd.py
+        mode: u=rwx,g=rx,o=rx
+
+    - name: configure pimd
+      shell: "/etc/map/configure_pimd.py -r {{ pim_rendezvous_ip }}"
+        
+    - name: restart pimd
+      systemd:
+        name: pimd
+        state: restarted
+      

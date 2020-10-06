@@ -1,0 +1,83 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: stop background traffic service
+      systemd:
+        name: background-traffic-driver
+        state: stopped
+        
+    - name: "Clear /var/lib/map/background-traffic"
+      file:
+        path: /var/lib/map/background-traffic
+        state: absent
+
+    - name: stop map system info service
+      systemd:
+        name: map_system_stats
+        state: stopped
+        
+    - name: "Clear /var/lib/map/system_stats"
+      file:
+        path: /var/lib/map/system_stats
+        state: absent
+        
+- hosts: ncps
+  become: yes
+  tasks:
+    - name: stop agent service
+      systemd:
+        name: map-agent
+        state: stopped
+    - name: "Clear /var/lib/map/agent"
+      file:
+        path: /var/lib/map/agent
+        state: absent
+
+- hosts: dns_servers
+  become: yes
+  tasks:
+    - name: stop service
+      systemd:
+        name: map-dns
+        state: stopped
+    - name: "Clear /var/lib/map/dns"
+      file:
+        path: /var/lib/map/dns
+        state: absent
+        
+- hosts: clients
+  become: yes
+  tasks:
+    - name: stop client service
+      systemd:
+        name: map-client
+        state: stopped
+    - name: "Clear /var/lib/map/client"
+      file:
+        path: /var/lib/map/client
+        state: absent
+
+- hosts: registry
+  become: yes
+  tasks:
+    - name: stop sim driver service
+      systemd:
+        name: sim-driver
+        state: stopped
+    - name: "Clear /var/lib/map/sim-driver"
+      file:
+        path: /var/lib/map/sim-driver
+        state: absent
+
+- hosts: ncps:clients
+  become: yes
+  tasks:
+    - name: clear collected data
+      file:
+        path: /var/lib/map/scenario-outputs
+        state: absent
+    - name: stop all docker containers
+      shell: docker ps -q | xargs -r docker stop
+    - name: remove all docker containers
+      shell: docker container prune -f

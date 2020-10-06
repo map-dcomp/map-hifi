@@ -1,0 +1,5 @@
+
+* DCOMP experiment / realization = Emulab profile
+* DCOMP materialization = Emulab experiment
+
+* DCOMP experiment, realization, materialization = Emulab Classic experiment

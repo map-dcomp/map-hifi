@@ -1,0 +1,10 @@
+[
+  {
+    "name": "pc3000",
+    "capacity": {
+      "CPU": 2,
+      "MEMORY": 2,
+      "TASK_CONTAINERS": 2
+    }
+  }
+]

@@ -1,0 +1,13 @@
+[
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "simple-webserver-database",
+	    "version": "1"
+	},
+	"startType": "JAVA_CLASS",
+	"startArguments": [ "com.bbn.map.hifi.client.RandomStringWebClient" ],
+	"stopType": "KILL_PROCESS",
+	"stopArguments": []
+    }    
+]

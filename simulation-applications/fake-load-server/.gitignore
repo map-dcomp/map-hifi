@@ -1,0 +1,10 @@
+/bin/
+/build/
+/logs/
+
+.externalToolBuilders
+.gradle
+.classpath
+
+*.log
+/.apt_generated/

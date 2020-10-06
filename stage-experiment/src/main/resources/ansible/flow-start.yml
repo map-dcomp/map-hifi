@@ -1,0 +1,19 @@
+---
+- hosts: ncps
+  become: yes
+
+  tasks:
+    - name: remove agent/flows
+      file:
+        path: /var/lib/map/agent/flows
+        state: absent
+    - name: create agent/flows
+      file:
+        path: /var/lib/map/agent/flows
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map
+        
+    - name: Start nfcapd
+      become_user: map
+      shell: nfcapd -D -p 9995 -l /var/lib/map/agent/flows

@@ -1,0 +1,13 @@
+- hosts: all
+  become: yes
+  tasks:
+    - name: restart zebra
+      systemd:
+        name: zebra
+        state: stopped
+        enabled: no
+    - name: restart ospfd
+      systemd:
+        name: ospfd
+        state: stopped
+        enabled: no

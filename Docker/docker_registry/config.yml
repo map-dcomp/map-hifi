@@ -1,0 +1,92 @@
+version: 0.1
+log:
+  accesslog:
+    disabled: true
+  level: debug
+  formatter: text
+  fields:
+    service: registry
+    environment: staging
+  hooks:
+    - type: mail
+      disabled: true
+      levels:
+        - panic
+      options:
+        smtp:
+          addr: mail.example.com:25
+          username: mailuser
+          password: password
+          insecure: true
+        from: sender@example.com
+        to:
+          - errors@example.com
+loglevel: debug # deprecated: use "log"
+storage:
+#  filesystem:
+#    rootdirectory: /var/lib/registry
+#    maxthreads: 100
+  inmemory:  # This driver takes no parameters
+  delete:
+    enabled: false
+  redirect:
+    disable: false
+  cache:
+    blobdescriptor: redis
+  maintenance:
+    uploadpurging:
+      enabled: true
+      age: 168h
+      interval: 24h
+      dryrun: false
+    readonly:
+      enabled: false
+auth:
+  silly:
+    realm: silly-realm
+    service: silly-service
+#  token:
+#    realm: token-realm
+#    service: token-service
+#    issuer: registry-token-issuer
+#    rootcertbundle: /root/certs/bundle
+#  htpasswd:
+#    realm: basic-realm
+#    path: /path/to/htpasswd
+http:
+  addr: 127.0.0.1:5000
+  # prefix: /my/nested/registry/
+  # host: https://myregistryaddress.org:5000
+  # secret: asecretforlocaldevelopment
+  relativeurls: false
+#  tls:
+#    certificate: /path/to/x509/public
+#    key: /path/to/x509/private
+#    clientcas:
+#      - /path/to/ca.pem
+#      - /path/to/another/ca.pem
+  debug:
+    addr: 127.0.0.1:5001
+  headers:
+    X-Content-Type-Options: [nosniff]
+  http2:
+    disabled: false
+redis:
+  addr: 127.0.0.1:6379
+  password: asecret
+  db: 0
+  dialtimeout: 10ms
+  readtimeout: 10ms
+  writetimeout: 10ms
+  pool:
+    maxidle: 16
+    maxactive: 64
+    idletimeout: 300s
+validation:
+  enabled: false
+  manifests:
+    urls:
+      allow:
+        - ^https?://([^/]+\.)*example\.com/
+      deny:
+        - ^https?://www\.example\.com/

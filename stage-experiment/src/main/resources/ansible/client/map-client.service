@@ -1,0 +1,15 @@
+[Unit]
+Description=MAP Client
+Requires=network.target
+After=network.target
+
+[Service]
+User=map
+WorkingDirectory=/var/lib/map/client
+ExecStart=/usr/bin/java -Xmx1G -jar /var/lib/map/client/map-client.jar
+StandardOutput=file:/var/lib/map/client/service.stdout.log
+StandardError=file:/var/lib/map/client/service.stderr.log
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=default.target

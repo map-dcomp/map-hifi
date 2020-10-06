@@ -1,0 +1,138 @@
+# -*- sh -*-
+# common code for all stage scripts
+
+help() {
+    log "Usage $0 --experiment <experiment name> [--demand <demand directory> --agent-configuration <agent config file> --scenario-name <name> --output <directory name> --client-service-config <filename> --scenario-dir <scenario directory>]"
+    exit
+}
+
+# parse arguments
+emulab_experiment=""
+agent_configuration=""
+output_dir=""
+client_service_config=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        --help|-h)
+            help
+            ;;
+        --scenario-dir)
+            if [ -z "$2" ]; then
+                fatal "--scenario-dir is missing argument"
+            fi
+            scenario_dir=$2
+            shift
+            ;;
+        --experiment)
+            if [ -z "$2" ]; then
+                fatal "--experiment is missing argument"
+            fi
+            emulab_experiment=$2
+            shift
+            ;;
+        --agent-configuration)
+            if [ -z "$2" ]; then
+                fatal "--agent-configuration is missing argument"
+            fi
+            agent_configuration="--agentConfiguration ${2}"
+            shift
+            ;;
+        --scenario-name)
+            if [ -z "$2" ]; then
+                fatal "--scenario-name is missing argument"
+            fi
+            scenario_name="${2}"
+            shift
+            ;;
+        --demand)
+            if [ -z "$2" ]; then
+                fatal "--demand is missing argument"
+            fi
+            demand_dir="${2}"
+            shift
+            ;;
+        --service-configurations)
+            if [ -z "$2" ]; then
+                fatal "--service-configurations is missing argument"
+            fi
+            service_configuration="--service-config ${2}"
+            shift
+            ;;
+        --client-service-config)
+            if [ -z "$2" ]; then
+                fatal "--client-service-config is missing argument"
+            fi
+            client_service_config="${2}"
+            shift
+            ;;
+        --output)
+            if [ -z "$2" ]; then
+                fatal "--output is missing argument"
+            fi
+            output_dir="${2}"
+            shift
+            ;;
+        *)
+            error "Unknown argument $1"
+            help
+            ;;
+    esac
+    shift
+done
+
+if [ -z "${emulab_experiment}" ]; then
+   help
+fi
+
+if [ ! -d "${demand_dir}" ]; then
+    fatal "Cannot find demand directory: ${demand_dir}"
+fi
+
+if [ ! -d "${scenario_dir}" ]; then
+    fatal "Cannot find scenario directory: ${scenario_dir}"
+fi
+
+if [ ! -d "${hifi_base}"/stage-experiment ]; then
+    fatal "Cannot find hi-fi repository from hifi_base variable"
+fi
+
+if [ -z "${client_service_config}" ]; then
+    client_service_config=${mydir}/client-service-configurations.json
+fi
+if [ ! -e "${client_service_config}" ]; then
+    fatal "Cannot find client service config: ${client_service_config}"
+fi
+
+agent_jar=$(ls -rt "${hifi_base}"/hifi-resmgr/build/libs/hifi-resmgr-*-executable.jar | tail -1)
+dns_jar=$(ls -rt "${hifi_base}"/DnsServer/build/libs/DnsServer-*-executable.jar | tail -1)
+client_jar=$(ls -rt "${hifi_base}"/ClientDriver/build/libs/ClientDriver-*-executable.jar | tail -1)
+client_pre_start_jar=$(ls -rt "${hifi_base}"/ClientPreStart/build/libs/ClientPreStart-*-executable.jar | tail -1)
+stage_experiment_jar=$(ls -rt "${hifi_base}"/stage-experiment/build/libs/stage-experiment-*-executable.jar | tail -1)
+sim_driver_jar=$(ls -rt "${hifi_base}"/SimulationDriver/build/libs/SimulationDriver-*-executable.jar | tail -1)
+background_driver_jar=$(ls -rt "${hifi_base}"/BackgroundTraffic/build/libs/BackgroundTraffic-*-executable.jar | tail -1)
+
+if [ -z output_dir ]; then
+    output_dir=${basedir}/generated_${scenario_name}_$(date +%Y%m%d_%H%M%s)
+fi
+try rm -fr "${output_dir}"
+try mkdir -p "${output_dir}"
+
+log "Outputting to ${output_dir}"
+
+try java -jar ${stage_experiment_jar} \
+    ${agent_configuration} \
+    ${service_configuration} \
+     --agent-jar ${agent_jar} \
+     --dns-jar ${dns_jar} \
+     --client-jar ${client_jar} \
+     --client-pre-start-jar ${client_pre_start_jar} \
+     --sim-driver-jar ${sim_driver_jar} \
+     --background-driver-jar ${background_driver_jar} \
+     --emulab-experiment ${emulab_experiment} \
+     --dumpEnabled \
+     --dumpDirectory /var/lib/map/agent \
+     --client-service-config "${client_service_config}" \
+     --scenario "${scenario_dir}" \
+     --demand "${demand_dir}" \
+     --output "${output_dir}" \
+     --scenario-name ${scenario_name}

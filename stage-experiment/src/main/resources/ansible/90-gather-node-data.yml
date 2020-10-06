@@ -1,0 +1,23 @@
+---
+- hosts: dns_servers
+  become: yes
+  tasks:
+    - name: "Flush DNS logs"
+      shell: java -jar /var/lib/map/dns/map-dns.jar --flush-logs
+
+- hosts: all
+  become: yes
+  tasks:
+    - name: copy collect-output script
+      copy:
+        src: collect-outputs.sh
+        dest: /var/lib/map/collect-outputs.sh
+        owner: root
+        mode: 0744
+    - name: Collect data
+      shell: /var/lib/map/collect-outputs.sh
+    - name: fetch collected data
+      fetch:
+        src: /var/lib/map/scenario-outputs/results.tar.xz
+        dest: "scenario-outputs/{{inventory_hostname_short}}.tar.xz"
+        flat: yes

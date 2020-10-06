@@ -1,0 +1,28 @@
+[
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "face-recognition",
+	    "version": "1"
+	},
+	"preStartType": "EXTERNAL_PROCESS",
+	"preStartArguments": [
+	    "/proj/a3/map/load_frs_client.sh"
+	],
+	"startType": "EXTERNAL_PROCESS",
+	"startArguments": [ "/proj/a3/map/start_frs_client.sh" ],
+	"stopType": "KILL_PROCESS",
+	"stopArguments": []
+    },
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "simple-webserver",
+	    "version": "1"
+	},
+	"startType": "JAVA_CLASS",
+	"startArguments": [ 	    "com.bbn.map.hifi.client.RandomStringWebClient" ],
+	"stopType": "KILL_PROCESS",
+	"stopArguments": []
+    }    
+]

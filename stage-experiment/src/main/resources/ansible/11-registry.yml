@@ -1,0 +1,45 @@
+- hosts: registry
+  become: yes
+  tasks:
+    - name: "Ensure /var/lib/map/registry exists"
+      file:
+        path: /var/lib/map/registry
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map       
+    - name: Copy registry configuration file
+      copy:
+        src: registry/config2.yml
+        dest: /var/lib/map/registry
+        owner: root
+        mode: 0444
+    - name: Copy run registry script
+      copy:
+        src: registry/run_docker_registry_map.sh
+        dest: /var/lib/map/registry
+        owner: root
+        mode: 0777
+
+    # this is the same file that ends up in /usr/local... below, but is needed in this location for the registry to start
+    - name: Push registry certificate to registry node
+      copy:
+        src: registry/client.cert
+        dest: /var/lib/map/registry
+    - name: Push registry key to registry node
+      copy:
+        src: registry/client.key
+        dest: /var/lib/map/registry
+
+- hosts: ncps:clients
+  become: yes
+  tasks:
+    - name: Push registry certificate to all nodes
+      copy:
+        src: registry/client.cert
+        dest: "/usr/local/share/ca-certificates/{{inventory_hostname_short}}:5000.crt"
+    - name: Trust registry certificate
+      shell: update-ca-certificates
+    - name: Restart Docker daemon
+      systemd:
+        name: docker
+        state: restarted

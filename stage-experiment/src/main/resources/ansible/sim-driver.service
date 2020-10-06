@@ -1,0 +1,16 @@
+[Unit]
+Description=MAP Sim Driver
+Requires=network.target
+After=network.target
+
+[Service]
+User=map
+WorkingDirectory=/var/lib/map/sim-driver
+ExecStart=/usr/bin/java -Xmx1G -jar /var/lib/map/sim-driver/sim-driver.jar --configuration-directory /var/lib/map/sim-driver/scenario --agentConfiguration /var/lib/map/sim-driver/agent-configuration.json
+SuccessExitStatus=0
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=default.target

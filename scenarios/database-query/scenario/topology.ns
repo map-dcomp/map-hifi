@@ -1,0 +1,217 @@
+set ns [new Simulator]
+source tb_compat.tcl
+
+# Clients
+set clientPoolA1 [$ns node]
+tb-set-node-os $clientPoolA1 XEN46-64-STD
+set clientPoolA2 [$ns node]
+tb-set-node-os $clientPoolA2 XEN46-64-STD
+set clientPoolA3 [$ns node]
+tb-set-node-os $clientPoolA3 XEN46-64-STD
+set clientPoolA4 [$ns node]
+tb-set-node-os $clientPoolA4 XEN46-64-STD
+set clientPoolA5 [$ns node]
+tb-set-node-os $clientPoolA5 XEN46-64-STD
+set clientPoolA6 [$ns node]
+tb-set-node-os $clientPoolA6 XEN46-64-STD
+set clientPoolA7 [$ns node]
+tb-set-node-os $clientPoolA7 XEN46-64-STD
+set clientPoolA8 [$ns node]
+tb-set-node-os $clientPoolA8 XEN46-64-STD
+set clientPoolA9 [$ns node]
+tb-set-node-os $clientPoolA9 XEN46-64-STD
+set clientPoolA10 [$ns node]
+tb-set-node-os $clientPoolA10 XEN46-64-STD
+set clientPoolA11 [$ns node]
+tb-set-node-os $clientPoolA11 XEN46-64-STD
+set clientPoolA12 [$ns node]
+tb-set-node-os $clientPoolA12 XEN46-64-STD
+set clientPoolA13 [$ns node]
+tb-set-node-os $clientPoolA13 XEN46-64-STD
+set clientPoolA14 [$ns node]
+tb-set-node-os $clientPoolA14 XEN46-64-STD
+set clientPoolA15 [$ns node]
+tb-set-node-os $clientPoolA15 XEN46-64-STD
+set clientPoolA16 [$ns node]
+tb-set-node-os $clientPoolA16 XEN46-64-STD
+set clientPoolA17 [$ns node]
+tb-set-node-os $clientPoolA17 XEN46-64-STD
+set clientPoolA18 [$ns node]
+tb-set-node-os $clientPoolA18 XEN46-64-STD
+set clientPoolA19 [$ns node]
+tb-set-node-os $clientPoolA19 XEN46-64-STD
+set clientPoolA20 [$ns node]
+tb-set-node-os $clientPoolA20 XEN46-64-STD
+
+set clientPoolB1 [$ns node]
+tb-set-node-os $clientPoolB1 XEN46-64-STD
+set clientPoolB2 [$ns node]
+tb-set-node-os $clientPoolB2 XEN46-64-STD
+set clientPoolB3 [$ns node]
+tb-set-node-os $clientPoolB3 XEN46-64-STD
+set clientPoolB4 [$ns node]
+tb-set-node-os $clientPoolB4 XEN46-64-STD
+set clientPoolB5 [$ns node]
+tb-set-node-os $clientPoolB5 XEN46-64-STD
+set clientPoolB6 [$ns node]
+tb-set-node-os $clientPoolB6 XEN46-64-STD
+set clientPoolB7 [$ns node]
+tb-set-node-os $clientPoolB7 XEN46-64-STD
+set clientPoolB8 [$ns node]
+tb-set-node-os $clientPoolB8 XEN46-64-STD
+set clientPoolB9 [$ns node]
+tb-set-node-os $clientPoolB9 XEN46-64-STD
+set clientPoolB10 [$ns node]
+tb-set-node-os $clientPoolB10 XEN46-64-STD
+set clientPoolB11 [$ns node]
+tb-set-node-os $clientPoolB11 XEN46-64-STD
+set clientPoolB12 [$ns node]
+tb-set-node-os $clientPoolB12 XEN46-64-STD
+set clientPoolB13 [$ns node]
+tb-set-node-os $clientPoolB13 XEN46-64-STD
+set clientPoolB14 [$ns node]
+tb-set-node-os $clientPoolB14 XEN46-64-STD
+set clientPoolB15 [$ns node]
+tb-set-node-os $clientPoolB15 XEN46-64-STD
+set clientPoolB16 [$ns node]
+tb-set-node-os $clientPoolB16 XEN46-64-STD
+set clientPoolB17 [$ns node]
+tb-set-node-os $clientPoolB17 XEN46-64-STD
+set clientPoolB18 [$ns node]
+tb-set-node-os $clientPoolB18 XEN46-64-STD
+set clientPoolB19 [$ns node]
+tb-set-node-os $clientPoolB19 XEN46-64-STD
+set clientPoolB20 [$ns node]
+tb-set-node-os $clientPoolB20 XEN46-64-STD
+
+set clientPoolC1 [$ns node]
+tb-set-node-os $clientPoolC1 XEN46-64-STD
+set clientPoolC2 [$ns node]
+tb-set-node-os $clientPoolC2 XEN46-64-STD
+set clientPoolC3 [$ns node]
+tb-set-node-os $clientPoolC3 XEN46-64-STD
+set clientPoolC4 [$ns node]
+tb-set-node-os $clientPoolC4 XEN46-64-STD
+set clientPoolC5 [$ns node]
+tb-set-node-os $clientPoolC5 XEN46-64-STD
+set clientPoolC6 [$ns node]
+tb-set-node-os $clientPoolC6 XEN46-64-STD
+set clientPoolC7 [$ns node]
+tb-set-node-os $clientPoolC7 XEN46-64-STD
+set clientPoolC8 [$ns node]
+tb-set-node-os $clientPoolC8 XEN46-64-STD
+set clientPoolC9 [$ns node]
+tb-set-node-os $clientPoolC9 XEN46-64-STD
+set clientPoolC10 [$ns node]
+tb-set-node-os $clientPoolC10 XEN46-64-STD
+set clientPoolC11 [$ns node]
+tb-set-node-os $clientPoolC11 XEN46-64-STD
+set clientPoolC12 [$ns node]
+tb-set-node-os $clientPoolC12 XEN46-64-STD
+set clientPoolC13 [$ns node]
+tb-set-node-os $clientPoolC13 XEN46-64-STD
+set clientPoolC14 [$ns node]
+tb-set-node-os $clientPoolC14 XEN46-64-STD
+set clientPoolC15 [$ns node]
+tb-set-node-os $clientPoolC15 XEN46-64-STD
+set clientPoolC16 [$ns node]
+tb-set-node-os $clientPoolC16 XEN46-64-STD
+set clientPoolC17 [$ns node]
+tb-set-node-os $clientPoolC17 XEN46-64-STD
+set clientPoolC18 [$ns node]
+tb-set-node-os $clientPoolC18 XEN46-64-STD
+set clientPoolC19 [$ns node]
+tb-set-node-os $clientPoolC19 XEN46-64-STD
+set clientPoolC20 [$ns node]
+tb-set-node-os $clientPoolC20 XEN46-64-STD
+
+
+# NCPs
+set nodeA0 [$ns node]
+tb-set-node-os $nodeA0 XEN46-64-STD
+tb-set-hardware $nodeA0 simple
+
+set nodeA1 [$ns node]
+tb-set-node-os $nodeA1 XEN46-64-STD
+tb-set-hardware $nodeA1 simple
+
+set nodeA2 [$ns node]
+tb-set-node-os $nodeA2 XEN46-64-STD
+tb-set-hardware $nodeA2 simple
+
+set nodeA3 [$ns node]
+tb-set-node-os $nodeA3 XEN46-64-STD
+tb-set-hardware $nodeA3 simple
+
+set nodeA4 [$ns node]
+tb-set-node-os $nodeA4 XEN46-64-STD
+tb-set-hardware $nodeA4 simple
+
+set nodeB0 [$ns node]
+tb-set-node-os $nodeB0 XEN46-64-STD
+tb-set-hardware $nodeB0 simple
+
+set nodeB1 [$ns node]
+tb-set-node-os $nodeB1 XEN46-64-STD
+tb-set-hardware $nodeB1 simple
+
+set nodeB2 [$ns node]
+tb-set-node-os $nodeB2 XEN46-64-STD
+tb-set-hardware $nodeB2 simple
+
+set nodeB3 [$ns node]
+tb-set-node-os $nodeB3 XEN46-64-STD
+tb-set-hardware $nodeB3 simple
+
+set nodeB4 [$ns node]
+tb-set-node-os $nodeB4 XEN46-64-STD
+tb-set-hardware $nodeB4 simple
+
+set nodeC0 [$ns node]
+tb-set-node-os $nodeC0 XEN46-64-STD
+tb-set-hardware $nodeC0 simple
+
+set nodeC1 [$ns node]
+tb-set-node-os $nodeC1 XEN46-64-STD
+tb-set-hardware $nodeC1 simple
+
+set nodeC2 [$ns node]
+tb-set-node-os $nodeC2 XEN46-64-STD
+tb-set-hardware $nodeC2 simple
+
+set nodeC3 [$ns node]
+tb-set-node-os $nodeC3 XEN46-64-STD
+tb-set-hardware $nodeC3 simple
+
+set nodeC4 [$ns node]
+tb-set-node-os $nodeC4 XEN46-64-STD
+tb-set-hardware $nodeC4 simple
+
+set serverX [$ns node]
+tb-set-node-os $serverX XEN46-64-STD
+tb-set-hardware $serverX large
+
+# regional networks
+set lanA [$ns make-lan "$nodeA0 $nodeA1 $nodeA2 $nodeA3 $nodeA4" 100Mb 0ms]
+
+set lanB [$ns make-lan "$nodeB0 $nodeB1 $nodeB2 $nodeB3 $nodeB4" 100Mb 0ms]
+
+set lanC [$ns make-lan "$nodeC0 $nodeC1 $nodeC2 $nodeC3 $nodeC4" 100Mb 0ms]
+
+# Links
+
+set linkBSB [$ns duplex-link $nodeB3 $serverX 100000.0kb 0.0ms DropTail]
+
+set regAB100 [$ns duplex-link $nodeA0 $nodeB0 100000.0kb 0.0ms DropTail]
+set regAC2 [$ns duplex-link $nodeA0 $nodeC0 100000.0kb 0.0ms DropTail]
+set regBC10 [$ns duplex-link $nodeB0 $nodeC0 100000.0kb 0.0ms DropTail]
+
+set lanClientPoolA [$ns make-lan "$nodeA3 $clientPoolA1 $clientPoolA2 $clientPoolA3 $clientPoolA4 $clientPoolA5 $clientPoolA6 $clientPoolA7 $clientPoolA8 $clientPoolA9 $clientPoolA10 $clientPoolA11 $clientPoolA12 $clientPoolA13 $clientPoolA14 $clientPoolA15 $clientPoolA16 $clientPoolA17 $clientPoolA18 $clientPoolA19 $clientPoolA20" 100Mb 0ms]
+
+set lanClientPoolB [$ns make-lan "$nodeA3 $clientPoolB1 $clientPoolB2 $clientPoolB3 $clientPoolB4 $clientPoolB5 $clientPoolB6 $clientPoolB7 $clientPoolB8 $clientPoolB9 $clientPoolB10 $clientPoolB11 $clientPoolB12 $clientPoolB13 $clientPoolB14 $clientPoolB15 $clientPoolB16 $clientPoolB17 $clientPoolB18 $clientPoolB19 $clientPoolB20" 100Mb 0ms]
+
+set lanClientPoolC [$ns make-lan "$nodeA3 $clientPoolC1 $clientPoolC2 $clientPoolC3 $clientPoolC4 $clientPoolC5 $clientPoolC6 $clientPoolC7 $clientPoolC8 $clientPoolC9 $clientPoolC10 $clientPoolC11 $clientPoolC12 $clientPoolC13 $clientPoolC14 $clientPoolC15 $clientPoolC16 $clientPoolC17 $clientPoolC18 $clientPoolC19 $clientPoolC20" 100Mb 0ms]
+
+
+$ns rtproto Static
+$ns run

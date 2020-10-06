@@ -1,0 +1,15 @@
+[Unit]
+Description=MAP System Stats
+Requires=network.target
+After=network.target
+
+[Service]
+User=map
+WorkingDirectory=/var/lib/map/system_stats
+ExecStart=/var/lib/map/system_stats/map_system_stats.py --output .
+SuccessExitStatus=0
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

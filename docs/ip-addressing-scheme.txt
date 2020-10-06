@@ -1,0 +1,15 @@
+Each region has a class C (/24 or 255.255.255.0) subnet.
+
+The primary interface of a host is the interface that is connected to the regional subnet matching the region of the host.
+
+Addresses 1-10 are for inter-regional connections. These are IP addresses for the non-primary interfaces on hosts.
+
+11 - NCP 1
+12,13,14,15 - containers on NCP 1
+16 - NCP 2
+17,18,19,20 - containers on NCP 2
+...
+
+200 - 253 - clients
+
+This is coded into StageExperiment and the rules are codified in SubnetBlock in the stage-experiment project.

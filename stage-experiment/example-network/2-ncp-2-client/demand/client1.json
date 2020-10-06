@@ -1,0 +1,53 @@
+[
+  {
+    "startTime": 1800000,
+    "serverDuration": 300000,
+    "networkDuration": 5000,
+    "numClients": 5,
+    "service": {
+      "group": "com.bbn",
+      "artifact": "simple-webserver",
+      "version": "1"
+    },
+    "nodeLoad": {
+      "TASK_CONTAINERS": 0.2
+    },
+    "networkLoad": {
+      "DATARATE": 5.0
+    }
+  },
+  {
+    "startTime": 3000000,
+    "serverDuration": 300000,
+    "networkDuration": 5000,
+    "numClients": 5,
+    "service": {
+      "group": "com.bbn",
+      "artifact": "simple-webserver",
+      "version": "1"
+    },
+    "nodeLoad": {
+      "TASK_CONTAINERS": 0.2
+    },
+    "networkLoad": {
+      "DATARATE": 5.0
+    }
+  },
+  {
+    "startTime": 6000000,
+    "serverDuration": 300000,
+    "networkDuration": 5000,
+    "numClients": 5,
+    "service": {
+      "group": "com.bbn",
+      "artifact": "simple-webserver",
+      "version": "1"
+    },
+    "nodeLoad": {
+      "TASK_CONTAINERS": 0.2
+    },
+    "networkLoad": {
+      "DATARATE": 5.0
+    }
+  }
+]

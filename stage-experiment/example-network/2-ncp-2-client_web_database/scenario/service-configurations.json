@@ -1,0 +1,44 @@
+[
+ {
+    "service": {
+      "group": "com.bbn",
+      "artifact": "simple-webserver-database",
+      "version": "1"
+    },
+    "hostname": "simple-webserver.map.dcomp",
+    "defaultNode": "nodeA0",
+    "defaultNodeRegion": "A",
+    "initialInstances": "1",
+    "computeCapacity": {
+      "TASK_CONTAINERS": "1",
+      "CPU": "1"
+    },
+    "networkCapacity": {
+      "DATARATE_TX": "100",
+      "DATARATE_RX": "100"
+    },
+    "imageName": "/v2/simple_webserver_database",
+    "serverPort": 8080
+  },
+  {
+    "service": {
+      "group": "com.bbn",
+      "artifact": "networked-file-store-server-publish",
+      "version": "1"
+    },
+    "hostname": "database-publish.map.dcomp",
+    "defaultNode": "nodeA1",
+    "defaultNodeRegion": "B",
+    "initialInstances": "1",
+    "computeCapacity": {
+      "TASK_CONTAINERS": "1",
+      "CPU": "1"
+    },
+    "networkCapacity": {
+      "DATARATE_TX": "100",
+      "DATARATE_RX": "100"
+    },
+    "imageName": "/v2/networked_file_store_server",
+    "serverPort": 59112
+  }
+]

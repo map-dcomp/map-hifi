@@ -1,0 +1,33 @@
+[
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "database-query",
+	    "version": "1"
+	},
+	"preStartType": "EXTERNAL_PROCESS",
+	"preStartArguments": [
+	    "/var/lib/map/client/load_database_query.sh"
+	],
+	"startType": "EXTERNAL_PROCESS",
+	"startArguments": [ "/var/lib/map/client/start_database_query.sh" ],
+	"stopType": "KILL_PROCESS",
+	"stopArguments": []
+    },
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "database-publish",
+	    "version": "1"
+	},
+	"preStartType": "EXTERNAL_PROCESS",
+	"preStartArguments": [
+	    "/var/lib/map/client/load_database_publish.sh"
+	],
+	"startType": "EXTERNAL_PROCESS",
+	"startArguments": [ "/var/lib/map/client/start_database_publish.sh" ],
+	"stopType": "KILL_PROCESS",
+	"stopArguments": []
+    }
+  
+]

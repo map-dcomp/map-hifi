@@ -1,0 +1,9 @@
+---
+- hosts: ncps
+  become: yes
+
+  tasks:
+    - name: stop nfcapd
+      become_user: map
+      shell: pkill nfcapd
+      ignore_errors: yes

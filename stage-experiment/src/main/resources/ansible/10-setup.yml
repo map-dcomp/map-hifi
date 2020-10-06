@@ -1,0 +1,120 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: "Ensure /etc/map exists"
+      file:
+        path: /etc/map
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: root
+    - name: "Ensure /var/lib/map exists"
+      file:
+        path: /var/lib/map
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map
+    - name: Give map user access to the appropriate groups
+      user:
+        name: map
+        groups: root,sudo
+        append: yes
+    - name: copy excluded subnets file
+      copy:
+        src: excluded-subnets.txt
+        dest: /etc/map/excluded-subnets.txt
+        owner: root
+        group: root
+        mode: 0444       
+    - name: copy local properties file
+      copy:
+        src: "{{inventory_hostname_short}}.local.properties"
+        dest: /etc/map/local.properties
+        owner: root
+        group: root
+        mode: 0444       
+    - name: Check for background traffic file
+      become: no
+      local_action: stat path="client/demand/background-traffic.json"
+      register: background_traffic
+    - name: copy background traffic
+      when: background_traffic.stat.exists == True
+      copy:
+        src: "client/demand/background-traffic.json"
+        dest: /etc/map/background-traffic.json
+        owner: root
+        group: root
+        mode: 0444
+    - name: "Ensure /var/lib/map/background-traffic exists"
+      file:
+        path: /var/lib/map/background-traffic
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map
+    - name: Install background traffic driver jar file
+      copy:
+        src: background-traffic-driver.jar
+        dest: /var/lib/map/background-traffic/background-traffic-driver.jar
+        owner: map
+        mode: 0444       
+    - name: Install background traffic log configuration
+      copy:
+        src: map-background-traffic.logging.xml 
+        dest: /var/lib/map/background-traffic/map-background-traffic.logging.xml
+        owner: map
+        mode: 0444
+    - name: install background traffic packages
+      apt:
+        update_cache: yes
+        name: "{{ packages }}"
+      vars:
+        packages:
+        - iperf3
+    - name: copy global properties file
+      copy:
+        src: global.properties
+        dest: /etc/map/global.properties
+        owner: root
+        group: root
+        mode: 0444       
+
+        
+- hosts: ncps:clients
+  become: yes
+  tasks:
+    - name: Give map user access to docker
+      user:
+        name: map
+        groups: docker
+        append: yes
+    - name: copy service configurations
+      copy:
+        src: service-configurations.json
+        dest: /etc/map/service-configurations.json
+        owner: root
+        group: root
+        mode: 0444
+    - name: Check for service dependencies
+      become: no
+      local_action: stat path="service-dependencies.json"
+      register: service_dependencies        
+    - name: copy service dependencies
+      when: service_dependencies.stat.exists == True
+      copy:
+        src: service-dependencies.json
+        dest: /etc/map/service-dependencies.json
+        owner: root
+        group: root
+        mode: 0444
+        
+    - name: install daemon.json for docker
+      copy:
+        src: daemon.json
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: 0444
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted

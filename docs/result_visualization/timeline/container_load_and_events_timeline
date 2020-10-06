@@ -1,0 +1,44 @@
+cpu_load_threshold=0.85
+input_file='load_event_data.csv'
+
+
+### Configuration ###
+set terminal png size 1600,800
+set datafile separator ","
+
+
+
+### Plots ###
+
+set xlabel "Time (ms)"
+set xrange [0:]
+
+
+set output 'hifi_timeline.png'
+
+set multiplot layout 2,1
+
+# CPU Load plot
+set title "Container Load over Time"
+set ylabel "CPU Load (CPUs)"
+plot cpu_load_threshold title sprintf("Threshold (%f)", cpu_load_threshold),\
+input_file using 1:3 with lines title "CPU Load 1",\
+input_file using 1:4 with lines title "CPU Load 2",\
+input_file using 1:5 with lines title "CPU Load 3",\
+input_file using 1:6 with lines title "CPU Load 4"\
+
+
+# Containers, RLG, and DCOP plot
+set title "Events"
+set ylabel " "
+plot \
+input_file using 1:2 with lines title "# of Containers",\
+input_file using 1:($7)*4 with lines title "RLG Event",\
+input_file using 1:($8)*4 with lines title "DCOP Event"
+
+unset multiplot
+
+
+
+
+

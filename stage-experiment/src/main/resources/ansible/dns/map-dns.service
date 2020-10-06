@@ -1,0 +1,18 @@
+[Unit]
+Description=MAP DNS
+Requires=network.target
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/map/dns
+ExecStart=/usr/bin/java -jar map-dns.jar --config /var/lib/map/dns/conf/config.xml
+SuccessExitStatus=0
+ExecStop=/usr/bin/java -jar map-dns.jar --config /var/lib/map/dns/conf/config.xml --shutdown
+Restart=on-failure
+RestartSec=1s
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=default.target

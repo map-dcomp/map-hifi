@@ -1,0 +1,23 @@
+[
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "database-query",
+	    "version": "1"
+	},
+	"hostname": "database-query.map.dcomp",
+	"defaultNode": "serverX",
+	"defaultNodeRegion": "X",
+	"initialInstances": "1",
+	"computeCapacity": {
+	    "TASK_CONTAINERS": "1",
+	    "CPU": "1"
+	},
+	"networkCapacity": {
+	    "DATARATE_TX": "100",
+	    "DATARATE_RX": "100"
+	},
+	"trafficType": "TX_GREATER",
+	"imageName": "/v2/networked_file_store_server"
+    }        
+]

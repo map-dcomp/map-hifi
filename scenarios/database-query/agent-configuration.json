@@ -1,0 +1,5 @@
+{
+  "dcopCapacityThreshold" : 0.55,
+  "dcopAlgorithm" : "DISTRIBUTED_CONSTRAINT_DIFFUSION",
+  "rlgAlgorithm" : "BIN_PACKING"
+}

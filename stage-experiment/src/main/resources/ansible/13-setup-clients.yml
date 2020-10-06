@@ -1,0 +1,89 @@
+- hosts: clients
+  become: yes
+  tasks:
+    - name: "Ensure /var/lib/map/client exists"
+      file:
+        path: /var/lib/map/client
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map
+    - name: Install client pre-start jar file
+      copy:
+        src: client/map-client-pre-start.jar
+        dest: /var/lib/map/client/map-client-pre-start.jar
+        owner: map
+        mode: 0444       
+    - name: Install client pre-start log configuration
+      copy:
+        src: client/map-client_pre_start.logging.xml
+        dest: /var/lib/map/client/map-client_pre_start.logging.xml
+        owner: map
+        mode: 0444
+    - name: Install client jar file
+      copy:
+        src: client/map-client.jar
+        dest: /var/lib/map/client/map-client.jar
+        owner: map
+        mode: 0444       
+    - name: Install client log configuration
+      copy:
+        src: client/map-client.logging.xml 
+        dest: /var/lib/map/client/map-client.logging.xml 
+        owner: map
+        mode: 0444
+    - name: Install start FRS client script
+      copy:
+        src: client/start_frs_client.sh
+        dest: /var/lib/map/client/start_frs_client.sh
+        owner: map
+        mode: 0744
+    - name: Install load FRS client script
+      copy:
+        src: client/load_frs_client.sh
+        dest: /var/lib/map/client/load_frs_client.sh
+        owner: map
+        mode: 0744
+    - name: Install start database query client script
+      copy:
+        src: client/start_database_query.sh
+        dest: /var/lib/map/client/start_database_query.sh
+        owner: map
+        mode: 0744
+    - name: Install load database query client script
+      copy:
+        src: client/load_database_query.sh
+        dest: /var/lib/map/client/load_database_query.sh
+        owner: map
+        mode: 0744
+    - name: Install start database publish client script
+      copy:
+        src: client/start_database_publish.sh
+        dest: /var/lib/map/client/start_database_publish.sh
+        owner: map
+        mode: 0744
+    - name: Install load database publish client script
+      copy:
+        src: client/load_database_publish.sh
+        dest: /var/lib/map/client/load_database_publish.sh
+        owner: map
+        mode: 0744
+    - name: config file
+      copy:
+        src: "{{inventory_hostname_short}}.json"
+        dest: /etc/map/config.json
+        owner: root
+        group: root
+        mode: 0444       
+    - name: install client service configurations
+      copy:
+        src: client/client-service-configurations.json
+        dest: /etc/map/client-service-configurations.json
+        owner: root
+        mode: 0664
+    - name: demand file
+      copy:
+        src: "client/demand/{{inventory_hostname_short}}.json"
+        dest: /etc/map/client-demand.json
+        owner: root
+        group: root
+        mode: 0444       

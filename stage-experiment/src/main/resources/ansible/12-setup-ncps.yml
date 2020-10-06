@@ -1,0 +1,86 @@
+- hosts: ncps
+  become: yes
+  tasks:
+    - name: "Ensure /var/lib/map/agent exists"
+      file:
+        path: /var/lib/map/agent
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map
+    - name: Install agent jar file
+      copy:
+        src: map-agent.jar
+        dest: /var/lib/map/agent/map-agent.jar
+        owner: map
+        mode: 0444       
+    - name: Install agent log configuration
+      copy:
+        src: map-hifi.logging.xml 
+        dest: /var/lib/map/agent
+        owner: map
+        mode: 0444
+    - name: copy neighbors file
+      copy:
+        src: "{{inventory_hostname_short}}.neighbors"
+        dest: /etc/map/neighbors.txt
+        owner: root
+        group: root
+        mode: 0444       
+    - name: copy agent configuration file
+      copy:
+        src: agent-configuration.json
+        dest: /etc/map/agent-configuration.json
+        owner: root
+        group: root
+        mode: 0444       
+    - name: copy container-names file
+      copy:
+        src: "{{inventory_hostname_short}}.container-names.txt"
+        dest: /etc/map/container-names.txt
+        owner: root
+        group: root
+        mode: 0444       
+    - name: copy ip-to-speed file
+      copy:
+        src: "{{inventory_hostname_short}}.ip-to-speed.txt"
+        dest: /etc/map/ip-to-speed.txt
+        owner: root
+        group: root
+        mode: 0444       
+    - name: config file
+      copy:
+        src: "{{inventory_hostname_short}}.json"
+        dest: /etc/map/config.json
+        owner: root
+        group: root
+        mode: 0444       
+    - name: "Copy map_common.py"
+      copy:
+        src: map_common.py
+        dest: /etc/map
+        owner: root
+        mode: 0664
+    - name: "Copy shutdown_network_interfaces.py"
+      copy:
+        src: shutdown_network_interfaces.py
+        dest: /etc/map
+        owner: root
+        mode: 0755
+    - name: "Copy region subnet file"
+      copy:
+        src: region_subnet.txt
+        dest: /etc/map
+        owner: root
+        mode: 0664
+    - name: "Copy hardware configurations"
+      copy:
+        src: sim-driver/scenario/hardware-configurations.json
+        dest: /etc/map
+        owner: root
+        mode: 0664
+    - name: "get_container_veth.sh"
+      copy:
+        src: get_container_veth.sh
+        dest: /etc/map
+        owner: root
+        mode: 0755

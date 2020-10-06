@@ -1,0 +1,32 @@
+set ns [new Simulator]
+source tb_compat.tcl
+
+# Nodes
+set nodeA0 [$ns node]
+tb-set-node-os $nodeA0 UBUNTU16-64-MAP
+tb-set-node-failure-action $nodeA0 nonfatal
+tb-set-hardware $nodeA0 pc3000
+
+set nodeA1 [$ns node]
+tb-set-node-os $nodeA1 UBUNTU16-64-MAP
+tb-set-node-failure-action $nodeA1 nonfatal
+tb-set-hardware $nodeA1 pc3000
+
+set client1 [$ns node]
+tb-set-node-os $client1 UBUNTU16-64-MAP
+tb-set-node-failure-action $client1 nonfatal
+
+set client2 [$ns node]
+tb-set-node-os $client2 UBUNTU16-64-MAP
+tb-set-node-failure-action $client2 nonfatal
+
+set c1a0 [$ns duplex-link $client1 $nodeA0 100000.0kb 0.0ms DropTail]
+set a0a1 [$ns duplex-link $nodeA0 $nodeA1 100000.0kb 0.0ms DropTail]
+set a1c2 [$ns duplex-link $nodeA1 $client2 100000.0kb 0.0ms DropTail]
+
+
+
+
+
+$ns rtproto Static
+$ns run

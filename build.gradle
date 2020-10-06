@@ -1,0 +1,75 @@
+buildscript {
+  repositories {
+      jcenter()
+  }
+}
+
+plugins {
+    id 'com.dorongold.task-tree' version '1.5'
+    
+    // version 4.0.4 and 5.0.0 don't work properly with subprojects
+    id 'com.github.johnrengelman.shadow' version '4.0.1' apply false
+
+    id 'com.github.spotbugs' version '1.7.1' apply false
+}
+
+allprojects {
+
+  buildscript {
+    repositories {
+        jcenter()
+    }
+  }
+
+
+  repositories {
+    // local repository first
+    mavenLocal()
+    
+    jcenter()
+
+    // published eagledns is only 1.0.1, but 1.1.2 is available 
+    flatDir {
+      dirs "$rootDir/extlib"
+    }
+  }
+  
+}
+
+subprojects {
+  apply plugin: 'java'
+  apply plugin: 'maven'
+  apply plugin: 'maven-publish'
+  apply plugin: 'eclipse'
+  apply plugin: 'idea'
+  apply plugin: 'checkstyle'
+  apply plugin: 'com.github.spotbugs'
+  apply plugin: 'maven-publish'
+  
+  eclipse {
+      classpath {
+          downloadSources = true
+          downloadJavadoc = true
+      }
+  }
+
+  spotbugs {
+    ignoreFailures = true
+    toolVersion = '3.1.12'
+  }
+  
+  jar {
+    manifest.attributes(
+       'Multi-Release': 'true'
+    )
+  }
+
+  test {
+      testLogging.showStandardStreams = true
+      ignoreFailures Boolean.getBoolean("test.ignoreFailures")
+      testLogging {
+          exceptionFormat = 'full'
+      }
+  }
+
+}

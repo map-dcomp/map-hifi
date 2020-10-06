@@ -1,0 +1,21 @@
+[
+ {
+    "service": {
+      "group": "com.bbn",
+      "artifact": "simple-webserver",
+      "version": "1"
+    },
+    "hostname": "simple-webserver.map.dcomp",
+    "defaultNode": "serverX",
+    "defaultNodeRegion": "X",
+    "initialInstances": "1",
+    "computeCapacity": {
+      "TASK_CONTAINERS": "1",
+      "CPU": "1"
+    },
+    "networkCapacity": {
+      "DATARATE_TX": "100",
+      "DATARATE_RX": "100"
+    }
+  }
+]

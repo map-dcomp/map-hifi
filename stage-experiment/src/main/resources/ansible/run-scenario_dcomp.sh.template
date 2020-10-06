@@ -1,0 +1,69 @@
+#!/bin/sh
+
+debug() { ! "${log_debug-false}" || log "DEBUG: $*" >&2; }
+log() { printf '%s\n' "$*"; }
+warn() { log "WARNING: $*" >&2; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+try() { "$@" || fatal "'$@' failed"; }
+
+mydir=$(cd "$(dirname "$0")" && pwd -L) || fatal "Unable to determine script directory"
+
+cleanup() {
+    debug "In cleanup"
+}
+trap 'cleanup' INT TERM EXIT
+
+log "Checking if you are logged in"
+mergetb list projects > /dev/null 2>&1
+if [ $? -ne 0  ]; then
+    fatal "You need to login to the testbed with mergetb login"
+fi
+log "You are logged in"
+
+auto_swap=0
+pass_args=""
+# argument parsing
+while [ $# -gt 0 ]; do
+    pass_args="${pass_args} $1"
+    
+    case "$1" in
+        "--auto-swap")
+            auto_swap=1
+            ;;
+    esac
+    shift
+done
+
+project=DCOMP_PROJECT
+experiment=EXPERIMENT
+scenario=SCENARIO_NAME
+
+output_dir=/project/map/scenario-outputs/${USER}
+
+log "Pushing topology to the experiment"
+try mergetb -p ${project} push ${experiment} "${mydir}"/dcomp-topology.py
+
+log "Realizing the scenario (reserve nodes)"
+try mergetb -p ${project} realize --accept ${experiment} ${scenario}
+
+log "Materializing the scenario"
+try mergetb -p ${project} materialize ${experiment} ${scenario}
+
+log "waiting for experiment to materialize"
+#until ! mergetb -p ${project} status ${experiment} ${scenario} | grep "false"; do sleep 1; log "--------"; log ""; done
+try mergetb -p ${project} wait ${experiment} ${scenario}
+
+
+try mergetb -p ${project} status ${experiment} ${scenario}
+
+log "Connecting network"
+try attach ${project} ${experiment} ${scenario}
+
+log "Executing scenario"
+try mkdir -p "${output_dir}"
+
+output_file=${output_dir}/${project}_${experiment}_${scenario}.execute.log
+log "The execution log is being saved to ${output_file}"
+
+try "${mydir}"/execute-scenario.sh ${pass_args} --dcomptb 2>&1 | tee "${output_file}"

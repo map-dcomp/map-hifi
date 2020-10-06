@@ -1,0 +1,8 @@
+---        
+- hosts: all
+  become: yes
+  tasks:
+    - name: start service
+      systemd:
+        name: map_system_stats
+        state: started

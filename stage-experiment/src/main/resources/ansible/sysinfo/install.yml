@@ -1,0 +1,27 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: create /var/lib/map/system_stats
+      file:
+        path: /var/lib/map/system_stats
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: map
+      
+    - name: install script
+      copy:
+        src: map_system_stats.py
+        dest: /var/lib/map/system_stats/map_system_stats.py
+        owner: root
+        group: root
+        mode: 0555
+
+    - name: install psutil package
+      apt:
+        update_cache: yes
+        name: "{{ packages }}"
+      vars:
+        packages:
+        - python3-psutil
+        

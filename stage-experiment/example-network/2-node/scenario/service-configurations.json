@@ -1,0 +1,36 @@
+[
+  {
+    "service": {
+      "group": "com.bbn",
+      "artifact": "image-recognition-high",
+      "version": "1"
+    },
+    "hostname": "image-recognition-high.map",
+    "defaultNode": "serverX",
+    "defaultNodeRegion": "X",
+    "initialInstances": "5",
+    "computeCapacity": {
+      "TASK_CONTAINERS": "1"
+    },
+    "networkCapacity": {
+      "DATARATE": "100"
+    }
+  },
+  {
+    "service": {
+      "group": "com.bbn",
+      "artifact": "image-recognition-low",
+      "version": "1"
+    },
+    "hostname": "image-recognition-low.map",
+    "defaultNode": "serverX",
+    "defaultNodeRegion": "X",
+    "initialInstances": "5",
+     "computeCapacity": {
+      "TASK_CONTAINERS": "1"
+    },
+    "networkCapacity": {
+      "DATARATE": "100"
+    }
+  }
+]

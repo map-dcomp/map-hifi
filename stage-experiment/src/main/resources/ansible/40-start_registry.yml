@@ -1,0 +1,8 @@
+---
+- hosts: registry
+  become: yes
+  tasks:
+    - name: Start registry
+      shell: ./run_docker_registry_map.sh
+      args:
+        chdir: /var/lib/map/registry

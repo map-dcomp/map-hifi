@@ -1,0 +1,64 @@
+plugins {
+    id 'java-library'
+    id "com.gorylenko.gradle-git-properties" version "1.5.2"    
+}
+
+
+def props = new Properties()
+file("../MAP-code/src/P2Protelis/gradle.properties").withInputStream { props.load(it) }
+file("../MAP-code/src/gradle.common.properties").withInputStream { props.load(it) }
+file("../gradle.common.properties").withInputStream { props.load(it) }
+
+group = 'com.bbn.map'
+version = props.getProperty("map_hifi_version")
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
+configurations {
+    providedRuntime
+    
+    all {
+        exclude group: 'ch.qos.logback'
+    }
+}
+
+dependencies {
+    api project(':P2Protelis')
+    api project(':MAP-Agent')
+    
+    implementation group: 'org.apache.commons', name: 'commons-csv', version: props.getProperty("commons_csv_version")
+    
+}
+
+checkstyle {
+    config = resources.text.fromFile('style.xml', 'UTF-8')
+    showViolations = true
+    ignoreFailures = false
+    toolVersion = "8.10"
+}
+
+task sourceJar(type: Jar) {
+  classifier "sources"
+  from sourceSets.main.allJava
+}
+
+publishing {
+    repositories {
+        mavenLocal()
+    }
+    
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifact sourceJar
+        }
+    }
+}
+
+gitProperties {
+    gitPropertiesDir = "${buildDir}/resources/main/com/bbn/map/hifi/utils"
+}

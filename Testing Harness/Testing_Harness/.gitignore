@@ -1,0 +1,14 @@
+/bin/
+/build/
+/logs/
+/.settings/
+
+.externalToolBuilders
+.gradle
+.classpath
+
+*.txt
+*.log
+*.csv
+*.xlsx
+experiments

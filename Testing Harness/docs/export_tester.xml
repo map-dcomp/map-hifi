@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project default="create_run_jar" name="Create Runnable Jar for Project Testing_Harness with Jar-in-Jar Loader">
+    <!--this file was created by Eclipse Runnable JAR file Export Wizard-->
+    <!--ANT 1.7 is required-->
+    <!--define folder properties-->
+    <property name="dir.buildfile" value="."/>
+    <property name="dir.workspace" value="${dir.buildfile}/../../../../.."/>
+    <property name="dir.jarfile" value="C:/Users/awald/Desktop"/>
+    <target name="create_run_jar">
+        <jar destfile="${dir.jarfile}/tester.jar">
+            <manifest>
+                <attribute name="Main-Class" value="org.eclipse.jdt.internal.jarinjarloader.JarRsrcLoader"/>
+                <attribute name="Rsrc-Main-Class" value="com.bbn.map.TestingHarness.testing.Tester"/>
+                <attribute name="Class-Path" value="."/>
+                <attribute name="Rsrc-Class-Path" value="./ log4j-core-2.8.2.jar log4j-1.2-api-2.8.2.jar log4j-api-2.8.2.jar commons-csv-1.5.jar"/>
+            </manifest>
+            <zipfileset src="jar-in-jar-loader.zip"/>
+            <fileset dir="${dir.workspace}/Git/bud/map-high-fidelity-testbed/Testing Harness/Testing_Harness/bin"/>
+            <zipfileset dir="C:/Users/awald/Documents/Development/Libraries/apache-log4j-2.8.2-bin" includes="log4j-core-2.8.2.jar"/>
+            <zipfileset dir="C:/Users/awald/Documents/Development/Libraries/apache-log4j-2.8.2-bin" includes="log4j-1.2-api-2.8.2.jar"/>
+            <zipfileset dir="C:/Users/awald/Documents/Development/Libraries/apache-log4j-2.8.2-bin" includes="log4j-api-2.8.2.jar"/>
+            <zipfileset dir="C:/Users/awald/Documents/Development/Libraries/commons-csv-1.5" includes="commons-csv-1.5.jar"/>
+        </jar>
+    </target>
+</project>

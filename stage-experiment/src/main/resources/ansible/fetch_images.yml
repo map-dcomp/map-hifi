@@ -1,0 +1,14 @@
+---
+- hosts: ncps
+  become: yes
+
+  tasks:
+    - name: install script
+      copy:
+        src: fetch_service_images.py
+        dest: /etc/map/fetch_service_images.py
+        mode: u=rwx,g=rx,o=rx
+
+    - name: execute script
+      shell: "/etc/map/fetch_service_images.py"
+      

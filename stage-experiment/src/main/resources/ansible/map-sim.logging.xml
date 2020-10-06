@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="warn">
+    <Appenders>
+        <RollingFile name="LOGFILE" filename="map-sim.log" filePattern="map-sim-%d{yyyyMMdd-HHmmss}.%i.log">
+            <PatternLayout pattern="%d{yyyy-MM-dd/HH:mm:ss.SSS/Z} [%t] %p %c %notEmpty{%x} %notEmpty{%X}- %m%n" />
+             <Policies>
+                <OnStartupTriggeringPolicy />
+            </Policies>
+        </RollingFile>
+    </Appenders>
+
+    <Loggers>
+        <!-- stuff for debugging -->
+        <!-- 
+        <Logger name="com.bbn.protelis.networkresourcemanagement.NetworkServer" level="TRACE"/>
+        <Logger name="com.bbn.protelis.networkresourcemanagement.NetworkNeighbor" level="TRACE"/>
+        <Logger name="com.bbn.map.simulator.Simulation" level="TRACE"/>
+        <Logger name="com.bbn.map.simulator.SimResourceManager" level="TRACE"/>
+        <Logger name="com.bbn.map.Controller" level="TRACE"/>
+          -->
+          
+        <!-- 
+        <Logger name="debug" level="TRACE" />
+-->
+        <!-- 
+        <Logger name="com.bbn.map.rlg"
+            level="TRACE" />
+            -->
+            <!-- 
+        <Logger name="com.bbn.map.simulator.SimpleClock"
+            level="TRACE" />
+             -->
+        <!-- 
+                        <Logger name="com.bbn.protelis.networkresourcemanagement.NetworkServer" level="TRACE" />
+-->
+ 
+        <!-- end stuff for debugging -->
+
+          <Logger name="com.bbn" level="INFO" />
+
+        <Root level="WARN">
+            <AppenderRef ref="LOGFILE" />
+        </Root>
+    </Loggers>
+
+</Configuration>

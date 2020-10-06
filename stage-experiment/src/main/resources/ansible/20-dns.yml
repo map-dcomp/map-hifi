@@ -1,0 +1,55 @@
+---
+- hosts: dns_servers
+  become: yes
+  tasks:
+    - name: "Ensure /var/lib/map/dns exists"
+      file:
+        path: /var/lib/map/dns
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: root
+    - name: "Ensure /var/lib/map/dns/logs exists"
+      file:
+        path: /var/lib/map/dns/logs
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: root
+    - name: Install DNS jar file
+      copy:
+        src: dns/map-dns.jar
+        dest: /var/lib/map/dns/map-dns.jar
+        owner: map
+        mode: 0444       
+    - name: Install DNS logging config
+      copy:
+        src: dns/map-dns.logging.xml
+        dest: /var/lib/map/dns/map-dns.logging.xml
+        owner: map
+        mode: 0444       
+    - name: Copy dns zone information
+      copy:
+        src: dns/{{inventory_hostname_short}}/zones/
+        dest: /var/lib/map/dns/zones
+    - name: "Ensure /var/lib/map/dns/conf exists"
+      file:
+        path: /var/lib/map/dns/conf
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: root
+    - name: Install dns config information
+      copy:
+        src: dns/{{inventory_hostname_short}}/conf/config.xml
+        dest: /var/lib/map/dns/conf/config.xml
+        mode: 0600
+    - name: install DNS systemd script
+      copy:
+        src: dns/map-dns.service
+        dest: /etc/systemd/system/map-dns.service
+        owner: root
+        mode: 0664
+    - name: start MAP DNS
+      systemd:
+        name: map-dns
+        state: restarted
+        enabled: yes
+        daemon-reload: yes

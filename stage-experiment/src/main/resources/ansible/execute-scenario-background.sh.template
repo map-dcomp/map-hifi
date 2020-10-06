@@ -1,0 +1,27 @@
+#!/bin/sh
+
+debug() { ! "${log_debug-false}" || log "DEBUG: $*" >&2; }
+log() { printf '%s\n' "$*"; }
+warn() { log "WARNING: $*" >&2; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+try() { "$@" || fatal "'$@' failed"; }
+
+mydir=$(cd "$(dirname "$0")" && pwd -L) || fatal "Unable to determine script directory"
+
+if [ -d /proj/a3/map ]; then
+    output_dir=/proj/a3/map/scenario-outputs/${USER}
+elif [ -d /project/map ]; then
+    output_dir=/project/map/scenario-outputs/${USER}
+else
+    fatal "Unable to determine output directory"
+fi
+
+execute_log=${output_dir}/EXPERIMENT.SCENARIO_NAME.execute.log
+
+try mkdir -p "${output_dir}"
+chmod g+w "${output_dir}" || log "Can't add group write to ${output_dir}, hoping that it's already set"
+
+"${mydir}"/execute-scenario.sh $* > "${execute_log}" 2>&1 &
+
+log "The scenario is executing, see ${execute_log} for the current status."

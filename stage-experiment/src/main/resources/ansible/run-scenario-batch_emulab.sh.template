@@ -1,0 +1,22 @@
+#!/bin/sh
+
+debug() { ! "${log_debug-false}" || log "DEBUG: $*" >&2; }
+log() { printf '%s\n' "$*"; }
+warn() { log "WARNING: $*" >&2; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+try() { "$@" || fatal "'$@' failed"; }
+
+mydir=$(cd "$(dirname "$0")" && pwd -L) || fatal "Unable to determine script directory"
+
+scenario_name=SCENARIO_NAME
+
+execute_log=/proj/a3/map/scenario-outputs/${USER}/${scenario_name}.execute.log
+
+# copy files to /tmp so that the python virtual environment is local and doesn't count against our quota
+run_dir=/tmp/map-simulation
+mkdir -p "${run_dir}"
+try rsync -r --progress "${mydir}"/ "${run_dir}"
+
+# always auto swap out batch jobs
+"${run_dir}"/execute-scenario.sh --auto-swap > "${execute_log}" 2>&1

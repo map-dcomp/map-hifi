@@ -1,0 +1,113 @@
+[
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "simple-webserver_large-response",
+	    "version": "1"
+	},
+	"hostname": "webserver-large-response.map.dcomp",
+	"defaultNodes": {
+	    "serverX" : 1
+	},
+	"defaultNodeRegion": "X",
+	"computeCapacity": {
+	    "TASK_CONTAINERS": "1",
+	    "CPU": "1"
+	},
+	"networkCapacity": {
+	    "DATARATE_TX": "100",
+	    "DATARATE_RX": "100"
+	},
+	"imageName": "/v2/simple_webserver_large-response",
+	"serverPort": 8080
+    },
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "simple-webserver_small-response",
+	    "version": "1"
+	},
+	"hostname": "webserver-small-response.map.dcomp",
+	"defaultNodes": {
+	    "serverX" : 1
+	},
+	"defaultNodeRegion": "X",
+	"computeCapacity": {
+	    "TASK_CONTAINERS": "1",
+	    "CPU": "1"
+	},
+	"networkCapacity": {
+	    "DATARATE_TX": "100",
+	    "DATARATE_RX": "100"
+	},
+	"imageName": "/v2/simple_webserver_small-response",
+	"serverPort": 8080
+    },
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "database-query",
+	    "version": "1"
+	},
+	"hostname": "database-query.map.dcomp",
+	"defaultNodes": {
+	    "serverX" : 1
+	},
+	"defaultNodeRegion": "X",
+	"computeCapacity": {
+	    "TASK_CONTAINERS": "1",
+	    "CPU": "1"
+	},
+	"networkCapacity": {
+	    "DATARATE_TX": "100",
+	    "DATARATE_RX": "100"
+	},
+	"imageName": "/v2/networked_file_store_server",
+	"serverPort": 59112
+    },
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "database-publish",
+	    "version": "1"
+	},
+	"hostname": "database-store.map.dcomp",
+	"defaultNodes": {
+	    "serverX" : 1
+	},
+	"defaultNodeRegion": "X",
+	"computeCapacity": {
+	    "TASK_CONTAINERS": "1",
+	    "CPU": "1"
+	},
+	"networkCapacity": {
+	    "DATARATE_TX": "100",
+	    "DATARATE_RX": "100"
+	},
+	"imageName": "/v2/networked_file_store_server",
+	"serverPort": 59112
+    },
+    {
+	"service": {
+	    "group": "com.bbn",
+	    "artifact": "fake",
+	    "version": "1"
+	},
+	"hostname": "fake.map.dcomp",
+	"defaultNode": {
+	    "B" : 1
+	},
+	"defaultNodeRegion": "rB",
+	"computeCapacity": {
+	    "TASK_CONTAINERS": "1",
+	    "CPU": "1"
+	},
+	"networkCapacity": {
+	    "DATARATE_TX": "100",
+	    "DATARATE_RX": "100"
+	},
+	"serverPort": 7000,
+	"imageName": "/v2/fake_load_server",
+	"priority": 1
+    }    
+]

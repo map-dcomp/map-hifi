@@ -1,0 +1,16 @@
+source tb_compat.tcl
+set ns [new Simulator]
+
+set n1 [$ns node]
+tb-set-node-os $n1 UBUNTU16-64-MAP
+tb-set-hardware $n1 simple
+
+set n2 [$ns node]
+tb-set-node-os $n2 UBUNTU16-64-MAP
+tb-set-hardware $n2 simple
+
+set link [$ns duplex-link $n1 $n2 100Mb 0ms DropTail]
+
+$ns rtproto Static
+
+$ns run

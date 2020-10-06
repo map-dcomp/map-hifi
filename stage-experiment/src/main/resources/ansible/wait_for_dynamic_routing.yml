@@ -1,0 +1,12 @@
+---
+- hosts: registry
+  become: yes
+  tasks:
+    - name: copy wait for routing script
+      copy:
+        src: wait_for_dynamic_routing.sh
+        dest: /var/lib/map/wait_for_dynamic_routing.sh
+        owner: root
+        mode: 0777
+    - name: "Wait for routing to come up"
+      command: /var/lib/map/wait_for_dynamic_routing.sh

@@ -1,0 +1,11 @@
+---        
+- hosts: clients
+  become: yes
+  tasks:
+    - name: Install agent jar file
+      copy:
+        src: client/map-client.jar
+        dest: /var/lib/map/client/map-client.jar
+        owner: map
+        mode: 0444
+

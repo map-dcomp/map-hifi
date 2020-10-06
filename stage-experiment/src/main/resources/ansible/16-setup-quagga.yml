@@ -1,0 +1,33 @@
+- hosts: all
+  become: yes
+  tasks:
+    - name: Install zebra.conf
+      copy:
+        src: quagga/zebra.conf.{{inventory_hostname_short}}
+        dest: /etc/quagga/zebra.conf
+        owner: quagga
+        mode: 0444       
+    - name: Install ospfd.conf
+      copy:
+        src: quagga/ospfd.conf.{{inventory_hostname_short}}
+        dest: /etc/quagga/ospfd.conf
+        owner: quagga
+        mode: 0444
+    - name: "Ensure /var/log/quagga/ is writable by quagga"
+      file:
+        path: /var/log/quagga
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: quagga
+    - name: restart zebra
+      systemd:
+        name: zebra
+        state: restarted
+        enabled: yes
+        daemon-reload: yes
+    - name: restart ospfd
+      systemd:
+        name: ospfd
+        state: restarted
+        enabled: yes
+        daemon-reload: yes

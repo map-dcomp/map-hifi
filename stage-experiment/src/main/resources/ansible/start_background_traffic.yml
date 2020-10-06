@@ -1,0 +1,10 @@
+---        
+- hosts: all
+  become: yes
+  tasks:
+    - name: start service
+      systemd:
+        name: background-traffic-driver
+        state: started
+        enabled: yes
+        daemon-reload: yes

@@ -1,0 +1,11 @@
+---        
+- hosts: ncps
+  become: yes
+  tasks:
+    - name: Install agent jar file
+      copy:
+        src: map-agent.jar
+        dest: /var/lib/map/agent/map-agent.jar
+        owner: map
+        mode: 0444
+
