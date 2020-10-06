@@ -18,12 +18,12 @@ The deployment scripts assume that the file is in
 /proj/a3/map/registry/map_service_images.tar on Emulab and in
 /project/map/registry/map_service_images.tar on the DCOMP
 testbed. These locations are specified in
-(stage-experiment/src/main/resources/ansible/11-copy-registry-images_dcomp.yml)
+[11-copy-registry-images_dcomp.yml](stage-experiment/src/main/resources/ansible/11-copy-registry-images_dcomp.yml)
 and
-(stage-experiment/src/main/resources/ansible/11-copy-registry-images_emulab.yml).
+[11-copy-registry-images_emulab.yml](stage-experiment/src/main/resources/ansible/11-copy-registry-images_emulab.yml).
 
 
-See (stage-experiment/docs/README.md) for information on staging an experiment.
+See [stage-experiment/docs/README.md](stage-experiment/docs/README.md) for information on staging an experiment.
 
-See (docs/testbed-terminology.txt) for information on translating
+See [docs/testbed-terminology.txt](docs/testbed-terminology.txt) for information on translating
 Emulab terms to DCOMP testbed terms.
