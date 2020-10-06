@@ -12,7 +12,7 @@ You will need to create the docker images for the test applications
 and put that in an accessible location in your test environment.  
 This can be done with either docker or podman. If podman is installed,
 it will be used.
-See the scripts in [Docker/service_images] for creating the images.
+See the scripts in [Docker/service_images](Docker/service_images) for creating the images.
 
 The deployment scripts assume that the file is in
 /proj/a3/map/registry/map_service_images.tar on Emulab and in
