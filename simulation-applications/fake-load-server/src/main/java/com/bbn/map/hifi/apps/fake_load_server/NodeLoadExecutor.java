@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -31,18 +31,36 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 BBN_LICENSE_END*/
 package com.bbn.map.hifi.apps.fake_load_server;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.bbn.map.hifi.apps.fake_load_server.fakeload.FakeSimulationInfrastructure;
+import com.bbn.map.hifi.apps.fake_load_server.fakeload.LoadControllerBackport;
+import com.bbn.map.hifi.apps.fake_load_server.fakeload.MapFakeLoadExecutor;
 import com.bbn.map.hifi.util.UnitConversions;
 import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.martensigwart.fakeload.CpuSimulator;
+import com.martensigwart.fakeload.DefaultFakeLoadScheduler;
+import com.martensigwart.fakeload.DiskInputSimulator;
+import com.martensigwart.fakeload.DiskOutputSimulator;
 import com.martensigwart.fakeload.FakeLoad;
 import com.martensigwart.fakeload.FakeLoadExecutor;
 import com.martensigwart.fakeload.FakeLoadExecutors;
 import com.martensigwart.fakeload.FakeLoads;
+import com.martensigwart.fakeload.FibonacciCpuSimulator;
+import com.martensigwart.fakeload.MemorySimulator;
 import com.martensigwart.fakeload.MemoryUnit;
+import com.martensigwart.fakeload.RandomAccessDiskInputSimulator;
+import com.martensigwart.fakeload.RandomAccessDiskOutputSimulator;
+import com.martensigwart.fakeload.SystemLoad;
 
 /**
  * 
@@ -78,8 +96,66 @@ import com.martensigwart.fakeload.MemoryUnit;
         final FakeLoad load = FakeLoads.create().withCpu(proposedCpuIncrease).withMemory(memoryBytes, MemoryUnit.BYTES)
                 .lasting(duration, TimeUnit.MILLISECONDS);
 
-        final FakeLoadExecutor executor = FakeLoadExecutors.newDefaultExecutor();
+        final FakeLoadExecutor executor = newExecutor();
         executor.execute(load);
+    }
+
+    // copied from com.martensigwart.fakeload.FakeLoadExecutor
+    private static final String DISK_INPUT_FILE = "input.tmp";
+    private static final String DISK_OUTPUT_FILE = "output.tmp";
+    private static final String DEFAULT_DISK_INPUT_PATH = System.getProperty("java.io.tmpdir") + "/" + DISK_INPUT_FILE;
+    private static final String DEFAULT_DISK_OUTPUT_PATH = System.getProperty("java.io.tmpdir") + "/"
+            + DISK_OUTPUT_FILE;
+    private static FakeSimulationInfrastructure defaultInfrastructure;
+
+    /**
+     * Copied from {@link FakeLoadExecutors#newDefaultExecutor()} and modified
+     * to change which infrastructure is being used.
+     */
+    private static synchronized FakeLoadExecutor newExecutor() {
+        // create infrastructure if it hasn't been created yet
+        if (defaultInfrastructure == null) {
+
+            try {
+                final int noOfCores = Runtime.getRuntime().availableProcessors();
+
+                // Create DiskInput Simulator
+                final DiskInputSimulator diskInputSimulator;
+                diskInputSimulator = new RandomAccessDiskInputSimulator(DEFAULT_DISK_INPUT_PATH);
+
+                // Create DiskOutput Simulator
+                final DiskOutputSimulator diskOutputSimulator;
+                diskOutputSimulator = new RandomAccessDiskOutputSimulator(DEFAULT_DISK_OUTPUT_PATH);
+
+                // Create Memory Simulator
+                final MemorySimulator memorySimulator = new MemorySimulator();
+
+                // Create CPU Simulators
+                final List<CpuSimulator> cpuSimulators = new ArrayList<>();
+                for (int i = 0; i < noOfCores; i++) {
+                    cpuSimulators.add(new FibonacciCpuSimulator());
+                }
+
+                // Inject dependencies for LoadController
+                final LoadControllerBackport controller = new LoadControllerBackport(new SystemLoad(), cpuSimulators,
+                        memorySimulator, diskInputSimulator, diskOutputSimulator);
+
+                // Create thread pool
+                final ExecutorService executorService = Executors.newFixedThreadPool(noOfCores + 4,
+                        new ThreadFactoryBuilder().setDaemon(true).build());
+
+                defaultInfrastructure = new FakeSimulationInfrastructure(executorService, controller);
+
+                /*
+                 * Catch blocks in case paths can be passed as parameters.
+                 */
+            } catch (final IOException e) {
+                LOGGER.error("File {} used for simulating disk output could not be created.", DEFAULT_DISK_OUTPUT_PATH);
+                throw new IllegalArgumentException(e);
+            }
+        }
+
+        return new MapFakeLoadExecutor(new DefaultFakeLoadScheduler(defaultInfrastructure));
     }
 
 }

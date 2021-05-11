@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -69,7 +69,11 @@ public final class IdentifierUtils {
             final NodeIdentifier id = new DnsNameIdentifier(name);
             return id;
         } catch (final UnknownHostException e) {
-            LOGGER.warn("Unable to find canonical name for {} in DNS, using bare name for node identifier", nameOrIp);
+            if (!nameOrIp.startsWith("127.")) {
+                // only log warnings about non-localhost traffic
+                LOGGER.warn("Unable to find canonical name for {} in DNS, using bare name for node identifier",
+                        nameOrIp);
+            }
             return new DnsNameIdentifier(nameOrIp);
         }
     }
@@ -87,6 +91,24 @@ public final class IdentifierUtils {
             return ni;
         } else {
             return getNodeIdentifier(ni.getName());
+        }
+    }
+
+    /**
+     * Get the simple name of a node. This is the name without any domain
+     * component.
+     * 
+     * @param nodeId
+     *            the identifier
+     * @return the simple node name
+     */
+    public static String getSimpleNodeName(final NodeIdentifier nodeId) {
+        final String fullName = nodeId.getName();
+        final int firstDot = fullName.indexOf('.');
+        if (firstDot >= 0) {
+            return fullName.substring(0, firstDot);
+        } else {
+            return fullName;
         }
     }
 }

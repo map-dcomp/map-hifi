@@ -27,7 +27,7 @@
         owner: map
         mode: 0444       
     - name: Copy dns zone information
-      copy:
+      ansible.posix.synchronize:
         src: dns/{{inventory_hostname_short}}/zones/
         dest: /var/lib/map/dns/zones
     - name: "Ensure /var/lib/map/dns/conf exists"
@@ -38,7 +38,7 @@
         owner: root
     - name: Install dns config information
       copy:
-        src: dns/{{inventory_hostname_short}}/conf/config.xml
+        src: dns/{{inventory_hostname_short}}/conf/config_{{testbed}}.xml
         dest: /var/lib/map/dns/conf/config.xml
         mode: 0600
     - name: install DNS systemd script
@@ -52,4 +52,3 @@
         name: map-dns
         state: restarted
         enabled: yes
-        daemon-reload: yes

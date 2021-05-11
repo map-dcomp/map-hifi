@@ -3,14 +3,11 @@
   become: yes
 
   tasks:
-    - name: install packages
+    - name: install netflow packages
       apt:
-        update_cache: yes
-        name: "{{ packages }}"
-      vars:
-        packages:
-        - nfdump
-        - fprobe
+        name:
+          - nfdump
+          - fprobe
 
     - name: fprobe interface
       lineinfile:
@@ -33,8 +30,11 @@
         name: nfdump
         state: stopped
         enabled: no
-        
+
     - name: restart fprobe
       systemd:
         name: fprobe
         state: restarted
+      register: fprobe_start
+      until: fprobe_start is not failed
+      retries: 5

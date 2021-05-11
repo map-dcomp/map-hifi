@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -50,8 +50,8 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.http.client.ClientProtocolException;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.xbill.DNS.Address;
 
+import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi.util.SimAppUtils;
 
 /**
@@ -194,7 +194,7 @@ public abstract class BaseRandomStringWebClient implements JavaClient {
                             // explicitly do the DNS resolution so that we can
                             // write
                             // the IP of the server into the log
-                            addr = Address.getByName(host);
+                            addr = DnsUtils.getByName(host);
                             final String urlStr = String.format("http://%s:%d/%s", addr.getHostAddress(), port, url);
 
                             // One should be able to just use Apache HTTP

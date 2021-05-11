@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -47,11 +47,11 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -60,7 +60,6 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -76,6 +75,7 @@ import org.apache.commons.cli.ParseException;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.io.LineIterator;
+import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.LogManager;
@@ -91,6 +91,7 @@ import com.bbn.map.hifi.HiFiAgent;
 import com.bbn.map.hifi.MapAgentLoggingConfig;
 import com.bbn.map.hifi.client.ClientDriver;
 import com.bbn.map.hifi.client.ClientServiceConfiguration;
+import com.bbn.map.hifi.dns.DnsServer;
 import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi_resmgr.SimpleDockerResourceManager;
 import com.bbn.map.simulator.BackgroundNetworkLoad;
@@ -140,7 +141,11 @@ public final class StageExperiment {
     private final Topology topology;
     private final ConfigOptions configOptions;
     private final Map<Node, String> nodeToRegion;
+    /** primary experiment network address for each node */
     private final Map<Node, InetAddress> nodeToPrimaryIp;
+    /** MAP control network address for each node */
+    private final Map<Node, InetAddress> nodeToControlIp;
+    /** all addresses for a node on the experiment network */
     private final Map<Node, Set<InetAddress>> nodeToAllAddresses;
     /**
      * Region name -> DNS servers in the region.
@@ -224,30 +229,38 @@ public final class StageExperiment {
         this.nodeToRegion = this.topology.getNodes().entrySet().stream().map(Map.Entry::getValue)
                 .filter(n -> !MapUtils.isUnderlay(n))
                 .collect(Collectors.toMap(n -> n, n -> NetworkServerProperties.parseRegionName(n.getExtraData())));
-        regionNodes = computeRegionNodes(this.topology, this.nodeToRegion);
+        this.regionNodes = computeRegionNodes(this.topology, this.nodeToRegion);
         assertNodeNamesValid(topology, regionNodes);
 
-        autoAssignIpAddresses = assignIpAddresses();
+        this.autoAssignIpAddresses = assignIpAddresses();
 
-        nodeToAllAddresses = determineAllAddressesForNodes(topology);
-        LOGGER.debug("Addresses {}", nodeToAllAddresses);
+        this.nodeToAllAddresses = determineAllAddressesForNodes(topology);
+        LOGGER.debug("Addresses {}", this.nodeToAllAddresses);
 
-        if (!autoAssignIpAddresses) {
+        if (!this.autoAssignIpAddresses) {
             computeContainerNames(this.topology, this.configOptions.containerNamesDirectory);
         }
 
-        nodeToPrimaryIp = determinePrimaryIpForLinks(this.topology, this.nodeToRegion, this.nodeToContainerAddresses);
+        this.subnets = computeSubnets(this.topology);
 
-        regionToDns = determineDnsServers(this.topology, this.nodeToRegion);
-        subnets = computeSubnets(this.topology);
+        final ImmutablePair<Map<Node, InetAddress>, Map<Subnet, String>> retval = determinePrimaryIpForLinks(
+                this.topology, this.nodeToRegion, this.nodeToContainerAddresses, this.subnets);
+        this.nodeToPrimaryIp = retval.getLeft();
+        this.subnetToRegion = retval.getRight();
 
-        subnetToRegion = buildSubnetToRegionMap(this.regionNodes, this.nodeToPrimaryIp, this.subnets);
+        if (this.configOptions.mapControlNetwork) {
+            this.nodeToControlIp = computeControlIps(this.nodeToPrimaryIp);
+        } else {
+            this.nodeToControlIp = this.nodeToPrimaryIp;
+        }
+
+        this.regionToDns = determineDnsServers(this.topology, this.nodeToRegion);
 
         assertRegionNamesValid(this.subnetToRegion);
         assertContainerNamesValid(this.nodeToContainerAddresses, this.nodeToAllAddresses);
 
         this.backgroundRequests = loadBackgroundTraffic();
-        assignBackgroundTrafficPorts(backgroundRequests);
+        assignBackgroundTrafficPorts(this.backgroundRequests);
         verifyBackgroundTraffic(this.backgroundRequests);
 
         verifyClientDemandServices();
@@ -255,6 +268,30 @@ public final class StageExperiment {
         verifyAgentConfiguration();
 
         verifyServiceConfiguration();
+    }
+
+    private static Map<Node, InetAddress> computeControlIps(final Map<Node, InetAddress> nodeToPrimaryIp) {
+        int thirdOctet = SubnetBlock.MIN_OCTET_VALUE;
+        int fourthOctet = SubnetBlock.MIN_OCTET_VALUE + 1;
+
+        final Map<Node, InetAddress> controlIps = new HashMap<>();
+        for (final Node node : nodeToPrimaryIp.keySet()) {
+            final InetAddress controlAddress = SubnetBlock.createAddress(HiFiAgent.MAP_CONTROL_FIRST_OCTET,
+                    HiFiAgent.MAP_CONTROL_SECOND_OCTET, thirdOctet, fourthOctet);
+            controlIps.put(node, controlAddress);
+
+            fourthOctet = fourthOctet + 1;
+            if (fourthOctet > SubnetBlock.MAX_OCTET_VALUE) {
+                thirdOctet = thirdOctet + 1;
+                if (thirdOctet > SubnetBlock.MAX_OCTET_VALUE) {
+                    throw new RuntimeException("Too many nodes for the MAP control network.");
+                }
+
+                fourthOctet = SubnetBlock.MIN_OCTET_VALUE;
+            }
+        }
+
+        return controlIps;
     }
 
     private void verifyServiceConfiguration() {
@@ -518,42 +555,6 @@ public final class StageExperiment {
     }
 
     /**
-     * @throws RuntimeException
-     *             if the subnet is mapped to multiple regions
-     * @return subnet -> region name
-     */
-    private static Map<Subnet, String> buildSubnetToRegionMap(final Map<String, Set<Node>> regionNodes,
-            final Map<Node, InetAddress> nodeToPrimaryIp,
-            final Set<Subnet> subnets) {
-        final Map<Subnet, String> subnetToRegion = new HashMap<>();
-
-        regionNodes.forEach((region, nodes) -> {
-            nodes.forEach(node -> {
-                final InetAddress nodePrimaryIp = nodeToPrimaryIp.get(node);
-                Objects.requireNonNull(nodePrimaryIp, "No primary IP for: " + node.getName());
-
-                final InetAddress nodeSubnetPrefix = getSubnetPrefix(nodePrimaryIp);
-
-                final Subnet regionSubnet = subnets.stream().filter(s -> nodeSubnetPrefix.equals(s.getPrefix()))
-                        .findFirst().orElse(null);
-                if (subnetToRegion.containsKey(regionSubnet)) {
-                    final String prevRegion = subnetToRegion.get(regionSubnet);
-                    if (!Objects.equals(prevRegion, region)) {
-                        final String message = String.format("Found multiple regions (%s, %s) for the same subnet: %s",
-                                prevRegion, region, regionSubnet.getPrefix());
-                        LOGGER.error(message);
-                        throw new RuntimeException(message);
-                    }
-                } else {
-                    subnetToRegion.put(regionSubnet, region);
-                }
-            });
-        }); // foreach region
-
-        return subnetToRegion;
-    }
-
-    /**
      * Compute the region to set of nodes in the region. Excludes underlay
      * nodes.
      */
@@ -623,6 +624,10 @@ public final class StageExperiment {
 
     private static final String BACKGROUND_TRAFFIC_DRIVER_JAR_OPT = "background-driver-jar";
 
+    private static final String ENABLE_MAP_CONTROL_NETWORK_OPT = "enable-map-control-network";
+
+    private static final String ENABLE_LINK_DELAY_OPT = "enable-link-delay";
+
     /**
      * Print out the usage information. Does not exit, that is up to the caller.
      * 
@@ -671,6 +676,10 @@ public final class StageExperiment {
         Path backgroundTrafficDriverJarFile;
 
         String serviceConfigFile = null;
+
+        boolean mapControlNetwork = false;
+
+        boolean disableLinkDelay = true;
     }
     // CHECKSTYLE:ON
 
@@ -741,6 +750,11 @@ public final class StageExperiment {
         options.addOption(null, SERVICE_CONFIG_OPT, true,
                 "The service configuration file to use, defaults to scenario/service-configurations.json");
 
+        options.addOption(null, ENABLE_MAP_CONTROL_NETWORK_OPT, false, "If set, create the MAP control network");
+
+        options.addOption(null, ENABLE_LINK_DELAY_OPT, false,
+                "If set, tell the testbed about link delays. DCOP is always told about them though.");
+
         options.addOption("h", HELP_OPT, false, "Show the help");
 
         final CommandLineParser parser = new DefaultParser();
@@ -777,6 +791,14 @@ public final class StageExperiment {
 
             configOptions.backgroundTrafficDriverJarFile = Paths
                     .get(cmd.getOptionValue(BACKGROUND_TRAFFIC_DRIVER_JAR_OPT));
+
+            if (cmd.hasOption(ENABLE_MAP_CONTROL_NETWORK_OPT)) {
+                configOptions.mapControlNetwork = true;
+            }
+
+            if (cmd.hasOption(ENABLE_LINK_DELAY_OPT)) {
+                configOptions.disableLinkDelay = false;
+            }
 
             if (cmd.hasOption(EMULAB_GROUP_OPT)) {
                 configOptions.emulabGroup = cmd.getOptionValue(EMULAB_GROUP_OPT);
@@ -887,8 +909,10 @@ public final class StageExperiment {
         createAnsibleHostsForDcomp(dockerRegistryNode);
 
         copyServiceConfigurations();
+        copyServiceDependencies();
         copyNodeConfigFiles();
-        copyTopology();
+        Files.copy(configOptions.scenarioPath.resolve(NS2Parser.TOPOLOGY_FILENAME),
+                configOptions.outputFolder.resolve("input_topology.ns"));
 
         if (!verifyNodeFailures(topology, globalLeader)) {
             // cannot execute, failures were logged by the verify function
@@ -898,7 +922,7 @@ public final class StageExperiment {
 
         writeAgentConfiguration();
 
-        writeRegistryInformation();
+        writeRegistryInformation(dockerRegistryNode);
 
         writeEmulabScriptInformation();
 
@@ -932,6 +956,7 @@ public final class StageExperiment {
 
         writeDcompPython();
         writeEmulabPython();
+        writeEmulabTopology();
 
         writePimdInformation();
 
@@ -941,6 +966,21 @@ public final class StageExperiment {
         copyBackgroundTrafficDriverJarFile();
 
         copySysinfo();
+
+        writeDcopLeaders();
+    }
+
+    private void writeDcopLeaders() throws IOException {
+        final Path destination = configOptions.outputFolder.resolve(HiFiAgent.DCOP_LEADERS_FILENAME);
+        try (BufferedWriter writer = Files.newBufferedWriter(destination)) {
+            topology.getNodes().entrySet().stream() //
+                    .map(Map.Entry::getValue) //
+                    .filter(n -> ControllerProperties.isRunningDcop(n.getExtraData())) //
+                    .forEach(Errors.rethrow().wrap(node -> {
+                        final String region = NetworkServerProperties.parseRegionName(node.getExtraData());
+                        writer.write(String.format("%s %s%n", region, node.getName()));
+                    }));
+        }
     }
 
     private void writeBackgroundTraffic() throws IOException {
@@ -978,7 +1018,7 @@ public final class StageExperiment {
     }
 
     private void writeAgentConfiguration() throws IOException {
-        final Path output = configOptions.outputFolder.resolve(HiFiAgent.AGENT_CONFIGURATION_FILENAME);
+        final Path output = configOptions.outputFolder.resolve(DnsServer.AGENT_CONFIGURATION_FILENAME);
 
         if (null == configOptions.agentConfiguration) {
             // write the defaults out
@@ -1040,8 +1080,10 @@ public final class StageExperiment {
             if (primaryLink.equals(link)) {
 
                 final HardwareConfiguration hardware = hardwareConfigs.get(node.getHardware());
-                final int maxContainers = hardware == null ? SubnetBlock.MAX_CONTAINERS_PER_NCP
-                        : hardware.getMaximumServiceContainers();
+                final int maxContainers = hardware == null ? 1 : hardware.getMaximumServiceContainers();
+
+                LOGGER.trace("Max containers for {} is {} with hardware {}", node.getName(), maxContainers,
+                        (null == hardware ? "null" : hardware.getName()));
 
                 final Pair<InetAddress, List<InetAddress>> pair = subnet.getNcpAddress(maxContainers);
 
@@ -1253,45 +1295,59 @@ public final class StageExperiment {
         writeEmulabRunScenarioBatchScript();
         writeExecuteScenarioScript();
         writeExecuteScenarioBackgroundScript();
-        writeWaitForDynamicRoutingScript();
+        writeWaitForDynamicRouting();
 
-        writeDcompRunScenarioScript();
+        writeDcompRunScenarioScripts();
 
         writeFetchImagesScript();
 
         Stream.of(new String[] { //
                 "wait_for_clients.py", //
-                "collect-outputs.sh" }).forEach(filename -> {
-                    copyResource("ansible/" + filename, filename, true);
-                });
+                "watchdog.py", //
+                "collect-outputs.sh" //
+        }).forEach(filename -> {
+            copyResource("ansible/" + filename, filename, true);
+        });
 
     }
 
-    private void writeDcompRunScenarioScript() throws IOException {
-        try (InputStream stream = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream("ansible/run-scenario_dcomp.sh.template")) {
-            Objects.requireNonNull(stream, "Cannot find ansible/run-scenario_dcomp.sh.template");
+    /**
+     * Read the template in {@code reader} and write to {@code writer} replacing
+     * the tokens for DCOMP variables.
+     */
+    private void generateDcompScriptFromTemplate(final BufferedReader reader, final BufferedWriter writer)
+            throws IOException {
+        try (LineIterator it = new LineIterator(reader)) {
+            while (it.hasNext()) {
+                final String line = it.next();
+                final String newLine = line.replaceAll("SCENARIO_NAME", getScenarioName()) //
+                        .replaceAll("EXPERIMENT", configOptions.experiment) //
+                        .replaceAll("DCOMP_PROJECT", configOptions.dcompProject) //
+                ;
+                writer.write(newLine);
+                writer.newLine();
+            }
+        } // LineIterator allocation
+    }
 
-            final Path destination = configOptions.outputFolder.resolve("run-scenario_dcomp.sh");
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, Charset.defaultCharset()));
-                    BufferedWriter writer = Files.newBufferedWriter(destination)) {
-                try (LineIterator it = new LineIterator(reader)) {
-                    while (it.hasNext()) {
-                        final String line = it.next();
-                        final String newLine = line.replaceAll("SCENARIO_NAME", getScenarioName()) //
-                                .replaceAll("EXPERIMENT", configOptions.experiment) //
-                                .replaceAll("DCOMP_PROJECT", configOptions.dcompProject) //
-                        ;
-                        writer.write(newLine);
-                        writer.newLine();
-                    }
-                } // LineIterator allocation
-            } // reader/writer allocation
+    private void writeDcompRunScenarioScripts() throws IOException {
+        for (final String script : new String[] { "run-scenario_dcomp.sh", "teardown_dcomp.sh", "setup_dcomp.sh" }) {
+            try (InputStream stream = Thread.currentThread().getContextClassLoader()
+                    .getResourceAsStream(String.format("ansible/%s.template", script))) {
+                Objects.requireNonNull(stream, String.format("Cannot find ansible/%s.template", script));
 
-            final Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(destination);
-            permissions.add(PosixFilePermission.OWNER_EXECUTE);
-            Files.setPosixFilePermissions(destination, permissions);
-        } // stream allocation
+                final Path destination = configOptions.outputFolder.resolve(script);
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(stream, Charset.defaultCharset()));
+                        BufferedWriter writer = Files.newBufferedWriter(destination)) {
+                    generateDcompScriptFromTemplate(reader, writer);
+                } // reader/writer allocation
+
+                final Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(destination);
+                permissions.add(PosixFilePermission.OWNER_EXECUTE);
+                Files.setPosixFilePermissions(destination, permissions);
+            } // stream allocation
+        } // foreach script
     }
 
     private String getScenarioName() {
@@ -1419,38 +1475,37 @@ public final class StageExperiment {
         } // stream allocation
     }
 
-    private void writeWaitForDynamicRoutingScript() throws IOException {
-        final Set<String> allIps = new HashSet<>();
+    private static final int PING_RETRY_DELAY_SECONDS = 1;
+    private static final Duration ROUTING_WAIT = Duration.ofHours(3);
+    private static final long PING_NUM_RETRIES = ROUTING_WAIT.getSeconds() / PING_RETRY_DELAY_SECONDS;
+
+    private void writeWaitForDynamicRouting() throws IOException {
+        final Map<String, Node> allIps = new HashMap<>();
         for (final Map.Entry<?, Node> sEntry : topology.getNodes().entrySet()) {
             final Node node = sEntry.getValue();
-            final Set<String> nodeIps = node.getAllIpAddresses().entrySet().stream().map(Map.Entry::getValue)
-                    .map(addr -> addr.getHostAddress()).collect(Collectors.toSet());
-            allIps.addAll(nodeIps);
+            final Map<String, Node> nodeIps = node.getAllIpAddresses().entrySet().stream().map(Map.Entry::getValue)
+                    .map(addr -> addr.getHostAddress()).collect(Collectors.toMap(addr -> addr, addr -> node));
+            allIps.putAll(nodeIps);
         }
 
-        final String allIpsStr = allIps.stream().map(ip -> ("'" + ip + "'")).collect(Collectors.joining(" "));
+        final Path destination = configOptions.outputFolder.resolve("wait_for_dynamic_routing.yml");
+        try (BufferedWriter writer = Files.newBufferedWriter(destination)) {
+            writer.write(String.format("- hosts: registry%n"));
+            writer.write(String.format("  tasks:%n"));
+            writer.newLine();
 
-        try (InputStream stream = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream("ansible/wait_for_dynamic_routing.sh.template")) {
-            Objects.requireNonNull(stream, "Cannot find ansible/wait_for_dynamic_routing.sh.template");
-
-            final Path destination = configOptions.outputFolder.resolve("wait_for_dynamic_routing.sh");
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, Charset.defaultCharset()));
-                    BufferedWriter writer = Files.newBufferedWriter(destination)) {
-                try (LineIterator it = new LineIterator(reader)) {
-                    while (it.hasNext()) {
-                        final String line = it.next();
-                        final String newLine = line.replaceAll("ALL_IP_ADDRESSES", allIpsStr);
-                        writer.write(newLine);
-                        writer.newLine();
-                    }
-                } // LineIterator allocation
-            } // reader/writer allocation
-
-            final Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(destination);
-            permissions.add(PosixFilePermission.OWNER_EXECUTE);
-            Files.setPosixFilePermissions(destination, permissions);
-        } // stream allocation
+            allIps.entrySet().forEach(Errors.rethrow().wrap(entry -> {
+                final String ip = entry.getKey();
+                final Node node = entry.getValue();
+                writer.write(String.format("    - name: check reachability of %s - %s%n", node.getName(), ip));
+                writer.write(String.format("      command: ping -c 1 %s%n", ip));
+                writer.write(String.format("      register: result%n"));
+                writer.write(String.format("      until: result is not failed%n"));
+                writer.write(String.format("      retries: %d%n", PING_NUM_RETRIES));
+                writer.write(String.format("      delay: %d%n", PING_RETRY_DELAY_SECONDS));
+                writer.newLine();
+            }));
+        } // writer allocation
     }
 
     private void writeEmulabRunScenarioScript() throws IOException {
@@ -1542,8 +1597,11 @@ public final class StageExperiment {
 
         copySimDriverJarFile(simDriverDir);
 
-        Stream.of(new String[] { "14-setup-sim-driver.yml", "55-start_sim-driver.yml", "stop_sim-driver.yml" })
-                .forEach(filename -> {
+        Stream.of(new String[] { "14-setup-sim-driver.yml", //
+                "14-copy-control-names_dcomp.yml", //
+                "14-copy-control-names_emulab.yml", //
+                "55-start_sim-driver.yml", //
+                "stop_sim-driver.yml" }).forEach(filename -> {
                     copyResource("ansible/" + filename, filename);
                 });
 
@@ -1664,7 +1722,7 @@ public final class StageExperiment {
     }
 
     private void writeRegionSubnetInformation() throws IOException {
-        final Path destination = configOptions.outputFolder.resolve("region_subnet.txt");
+        final Path destination = configOptions.outputFolder.resolve(HiFiAgent.REGION_SUBNET_FILENAME);
         try (BufferedWriter writer = Files.newBufferedWriter(destination)) {
             for (final Map.Entry<Subnet, String> entry : subnetToRegion.entrySet()) {
                 // assumes class C
@@ -1698,7 +1756,8 @@ public final class StageExperiment {
                         writer.write(String.format("- hosts: %s%n", getAnsibleMapAlias(node)));
                         writer.write(String.format("  become: yes%n"));
                         writer.write(String.format("  tasks:%n"));
-                        writer.write(String.format("    - shell: /etc/map/setup-docker-networking.py --ip %s%n",
+                        writer.write(String.format("    - name: Configure docker network on %s%n", node.getName()));
+                        writer.write(String.format("      shell: /etc/map/setup-docker-networking.py --ip %s%n",
                                 primaryIp.getHostAddress()));
                         writer.newLine();
                     } // have primary IP
@@ -1708,8 +1767,6 @@ public final class StageExperiment {
     }
 
     private void writeDnsInformation() throws IOException {
-        writeResolveConfHead();
-
         final Path dnsDir = configOptions.outputFolder.resolve(String.format("dns/"));
         if (!Files.exists(dnsDir)) {
             Files.createDirectories(dnsDir);
@@ -1731,6 +1788,42 @@ public final class StageExperiment {
             writeDnsForRegion(entry.getKey());
         }
 
+        writeHostsToCache();
+    }
+
+    /**
+     * All of hte experiment nodes and containers don't change addresses
+     * throughout the experiment, have each agent cache them.
+     */
+    private void writeHostsToCache() throws IOException {
+        final Path output = configOptions.outputFolder.resolve(DnsUtils.HOSTS_TO_CACHE_FILENAME);
+        try (BufferedWriter writer = Files.newBufferedWriter(output)) {
+            for (final Map.Entry<Node, InetAddress> entry : nodeToPrimaryIp.entrySet()) {
+                final Node node = entry.getKey();
+                final String nodeName = node.getName();
+                final InetAddress nodeIp = entry.getValue();
+
+                writer.write(String.format("%s.%s %s%n", nodeName, DnsUtils.MAP_TLD, nodeIp.getHostAddress()));
+
+                final InetAddress controlIp = nodeToControlIp.get(node);
+                if (null != controlIp) {
+                    writer.write(String.format("%s.%s %s%n", nodeName, DnsUtils.MAP_CONTROL_TLD,
+                            controlIp.getHostAddress()));
+                }
+
+                if (MapUtils.isNcp(node)) {
+                    final Map<InetAddress, String> containerNames = nodeToContainerAddresses.getOrDefault(node,
+                            Collections.emptyMap());
+                    for (final Map.Entry<InetAddress, String> centry : containerNames.entrySet()) {
+                        final String baseContainerName = centry.getValue();
+
+                        writer.write(String.format("%s.%s %s%n", baseContainerName, DnsUtils.MAP_TLD,
+                                centry.getKey().getHostAddress()));
+                    } // foreach container
+                } // if server
+
+            } // foreach node
+        }
     }
 
     private void writeAnsibleDnsPlaybook() throws IOException {
@@ -1776,25 +1869,8 @@ public final class StageExperiment {
 
                     // entry needs to be an IP address
                     final String servers = dnsEntry.getValue().stream()
-                            .map(node -> nodeToPrimaryIp.get(node).getHostAddress()).collect(Collectors.joining(", "));
+                            .map(node -> nodeToControlIp.get(node).getHostAddress()).collect(Collectors.joining(", "));
                     writer.write(String.format("        line: 'DNS=%s'%n", servers));
-
-                    // specify search domains
-                    writer.write(String.format("    - name: Search map.dcomp for hosts%n"));
-                    writer.write(String.format("      lineinfile:%n"));
-                    writer.write(String.format("        path: /etc/systemd/resolved.conf%n"));
-                    writer.write(String.format("        insertafter: '^[Resolve]'%n"));
-                    writer.write(String.format("        regexp: '^Domains='%n"));
-                    writer.write(String.format("        line: 'Domains=map.dcomp'%n", servers));
-                    writer.write(String.format("%n"));
-
-                    writer.write(String.format("    - name: Ensure /etc/resolv.conf is a symlink%n"));
-                    writer.write(String.format("      file:%n"));
-                    writer.write(String.format("        src: /run/systemd/resolve/resolv.conf%n"));
-                    writer.write(String.format("        dest: /etc/resolv.conf%n"));
-                    writer.write(String.format("        state: link%n"));
-                    writer.write(String.format("        force: yes%n"));
-                    writer.write(String.format("%n"));
 
                     writer.write(String.format("    - name: reload systemd-resolved%n"));
                     writer.write(String.format("      systemd:%n"));
@@ -1833,17 +1909,8 @@ public final class StageExperiment {
 
                     // entry needs to be an IP address
                     final String servers = dnsEntry.getValue().stream()
-                            .map(node -> nodeToPrimaryIp.get(node).getHostAddress()).collect(Collectors.joining(", "));
+                            .map(node -> nodeToControlIp.get(node).getHostAddress()).collect(Collectors.joining(", "));
                     writer.write(String.format("        line: 'DNS=%s'%n", servers));
-
-                    // specify search domains
-                    writer.write(String.format("    - name: Search map.dcomp for hosts%n"));
-                    writer.write(String.format("      lineinfile:%n"));
-                    writer.write(String.format("        path: /etc/systemd/resolved.conf%n"));
-                    writer.write(String.format("        insertafter: '^[Resolve]'%n"));
-                    writer.write(String.format("        regexp: '^Domains='%n"));
-                    writer.write(String.format("        line: 'Domains=map.dcomp'%n", servers));
-                    writer.write(String.format("%n"));
 
                     writer.write(String.format("    - name: Ensure /etc/resolv.conf is a symlink%n"));
                     writer.write(String.format("      file:%n"));
@@ -1868,19 +1935,70 @@ public final class StageExperiment {
         } // stream allocation
     }
 
-    private static Map<Node, InetAddress> determinePrimaryIpForLinks(final Topology topology,
+    private static ImmutablePair<Map<Node, InetAddress>, Map<Subnet, String>> determinePrimaryIpForLinks(
+            final Topology topology,
             final Map<Node, String> nodeToRegion,
-            final Map<Node, Map<InetAddress, String>> nodeToContainerAddresses) {
+            final Map<Node, Map<InetAddress, String>> nodeToContainerAddresses,
+            Set<Subnet> subnets) {
         final Map<Node, InetAddress> lNodeToPrimaryIp = new HashMap<>();
+        final Map<Subnet, String> subnetToRegion = new HashMap<>();
+        final Collection<Node> ambiguousNodes = new LinkedList<>();
+
         topology.getNodes().forEach((name, node) -> {
             final InetAddress primaryIp = getPrimaryIpForNode(node, nodeToRegion, nodeToContainerAddresses);
             if (null != primaryIp) {
                 lNodeToPrimaryIp.put(node, primaryIp);
+
+                final InetAddress nodeSubnetPrefix = getSubnetPrefix(primaryIp);
+
+                final String nodeRegion = nodeToRegion.get(node);
+
+                final Subnet regionSubnet = subnets.stream().filter(s -> nodeSubnetPrefix.equals(s.getPrefix()))
+                        .findFirst().orElse(null);
+                if (subnetToRegion.containsKey(regionSubnet)) {
+                    final String prevRegion = subnetToRegion.get(regionSubnet);
+                    if (!Objects.equals(prevRegion, nodeRegion)) {
+                        final String message = String.format("Found multiple regions (%s, %s) for the same subnet: %s",
+                                prevRegion, nodeRegion, regionSubnet.getPrefix());
+                        LOGGER.error(message);
+                        throw new RuntimeException(message);
+                    }
+                } else {
+                    subnetToRegion.put(regionSubnet, nodeRegion);
+                }
+
             } else {
-                throw new NullPointerException("Cannot determine primary IP for " + node);
+                ambiguousNodes.add(node);
             }
         });
-        return lNodeToPrimaryIp;
+
+        // try and determine primary IPs based on subnetToRegion
+        ambiguousNodes.forEach(node -> {
+            final String nodeRegion = nodeToRegion.get(node);
+
+            InetAddress primaryIp = null;
+            for (final InetAddress addr : node.getAllIpAddresses().values()) {
+                final InetAddress nodeSubnetPrefix = getSubnetPrefix(addr);
+                final Optional<Subnet> ipSubnet = subnets.stream().filter(s -> nodeSubnetPrefix.equals(s.getPrefix()))
+                        .findFirst();
+                if (ipSubnet.isPresent()) {
+                    final String subnetRegion = subnetToRegion.get(ipSubnet.get());
+                    if (nodeRegion.equals(subnetRegion)) {
+                        // first address that is in a subnet with a region
+                        // matching that of the node is the primary IP address
+                        primaryIp = addr;
+                        break;
+                    }
+                }
+            }
+
+            if (null == primaryIp) {
+                throw new RuntimeException("Could not determine primary IP address for " + node + " with addresses "
+                        + node.getAllIpAddresses().values());
+            }
+        });
+
+        return ImmutablePair.of(lNodeToPrimaryIp, subnetToRegion);
     }
 
     private static Map<Node, Set<InetAddress>> determineAllAddressesForNodes(final Topology topology) {
@@ -1927,7 +2045,6 @@ public final class StageExperiment {
 
             // find all neighbors in the same region
             final Map<Node, Link> neighborNodesInRegion = new HashMap<>();
-
             for (final Link link : links) {
                 final NetworkDevice neighborDevice = link.getLeft().equals(node) ? link.getRight() : link.getLeft();
                 if (neighborDevice instanceof Node) {
@@ -1960,56 +2077,58 @@ public final class StageExperiment {
                         .orElse(null);
                 final InetAddress primaryIp = node.getIpAddress(link);
                 return primaryIp;
-            } else {
-                // First check if all of the neighbors are in the same subnet.
-                final Set<InetAddress> neighborSubnets = neighborNodesInRegion.entrySet().stream()
-                        .map(Map.Entry::getValue).map(l -> node.getIpAddress(l)).map(a -> getSubnetPrefix(a))
-                        .collect(Collectors.toSet());
-                if (1 == neighborSubnets.size()) {
-                    // get the address to the first neighbor and just use it
-                    final Link neighborLink = neighborNodesInRegion.entrySet().iterator().next().getValue();
-                    final InetAddress primaryIp = node.getIpAddress(neighborLink);
-                    return primaryIp;
-                }
+            }
 
-                // Next find the link that has an address in the same
-                // subnet one of the containers is the one to choose.
-                final Map<InetAddress, String> containerAddresses = nodeToContainerAddresses.get(node);
-                if (null != containerAddresses && !containerAddresses.isEmpty()) {
-                    final Set<InetAddress> containerSubnets = containerAddresses.entrySet().stream()
-                            .map(Map.Entry::getKey).map(a -> getSubnetPrefix(a)).collect(Collectors.toSet());
-                    for (final Map.Entry<Node, Link> neighborEntry : neighborNodesInRegion.entrySet()) {
-                        final InetAddress nodeAddress = node.getIpAddress(neighborEntry.getValue());
-                        final InetAddress nodeSubnet = getSubnetPrefix(nodeAddress);
-                        if (containerSubnets.contains(nodeSubnet)) {
-                            return nodeAddress;
-                        }
-                    }
-                } else {
-                    // if all region neighbors are clients and only 1 is a node,
-                    // then use the link with the node
-                    final Map<Node, Link> regionalNeighborNodes = neighborNodesInRegion.entrySet().stream()
-                            .filter(e -> MapUtils.isNcp(e.getKey()))
-                            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-                    if (1 == regionalNeighborNodes.size()) {
-                        final Link link = regionalNeighborNodes.entrySet().stream().map(Map.Entry::getValue).findFirst()
-                                .orElse(null);
-                        Objects.requireNonNull(link, "Cannot find neighbor in the region");
-                        final InetAddress primaryIp = node.getIpAddress(link);
-                        return primaryIp;
-                    } else {
-                        LOGGER.warn(
-                                "Node {} has multiple neighbors in the same region that are in different subnets ({}) and the node doesn't have any containers to determine the primary IP address",
-                                node.getName(),
-                                neighborSubnets.stream().map(s -> s.getHostAddress()).collect(Collectors.toList()));
+            // First check if all of the neighbors are in the same subnet.
+            final Set<InetAddress> neighborSubnets = neighborNodesInRegion.entrySet().stream().map(Map.Entry::getValue)
+                    .map(l -> node.getIpAddress(l)).map(a -> getSubnetPrefix(a)).collect(Collectors.toSet());
+            if (1 == neighborSubnets.size()) {
+                // get the address to the first neighbor and just use it
+                final Link neighborLink = neighborNodesInRegion.entrySet().iterator().next().getValue();
+                final InetAddress primaryIp = node.getIpAddress(neighborLink);
+                return primaryIp;
+            }
+
+            // Next find the link that has an address in the same
+            // subnet one of the containers is the one to choose.
+            final Map<InetAddress, String> containerAddresses = nodeToContainerAddresses.get(node);
+            if (null != containerAddresses && !containerAddresses.isEmpty()) {
+                final Set<InetAddress> containerSubnets = containerAddresses.entrySet().stream().map(Map.Entry::getKey)
+                        .map(a -> getSubnetPrefix(a)).collect(Collectors.toSet());
+                for (final Map.Entry<Node, Link> neighborEntry : neighborNodesInRegion.entrySet()) {
+                    final InetAddress nodeAddress = node.getIpAddress(neighborEntry.getValue());
+                    final InetAddress nodeSubnet = getSubnetPrefix(nodeAddress);
+                    if (containerSubnets.contains(nodeSubnet)) {
+                        return nodeAddress;
                     }
                 }
             }
 
+            // if all region neighbors are clients and only 1 is a node,
+            // then use the link with the node
+            final Map<Node, Link> regionalNeighborNodes = neighborNodesInRegion.entrySet().stream()
+                    .filter(e -> MapUtils.isNcp(e.getKey()))
+                    .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            if (1 == regionalNeighborNodes.size()) {
+                final Link link = regionalNeighborNodes.entrySet().stream().map(Map.Entry::getValue).findFirst()
+                        .orElse(null);
+                Objects.requireNonNull(link, "Cannot find neighbor in the region");
+                final InetAddress primaryIp = node.getIpAddress(link);
+                return primaryIp;
+            }
+
+            if (!neighborNodesInRegion.isEmpty()) {
+                // pick a link from those that are in the same region
+                final Link link = neighborNodesInRegion.entrySet().stream().map(Map.Entry::getValue).findFirst()
+                        .orElse(null);
+                final InetAddress primaryIp = node.getIpAddress(link);
+                return primaryIp;
+            }
+
             LOGGER.warn(
-                    "Standard rules for finding primary IP for for node {} were not able to determine the primary IP address. Falling back to just using the first address. Neighbors in region: {}",
+                    "Standard rules for finding primary IP for for node {} were not able to determine the primary IP address.. Neighbors in region: {}",
                     node.getName(), neighborNodesInRegion.keySet());
-            return node.getIpAddress(links.iterator().next());
+            return null;
         }
     }
 
@@ -2160,7 +2279,10 @@ public final class StageExperiment {
                     for (final Map.Entry<Link, InetAddress> addrEntry : node.getAllIpAddresses().entrySet()) {
                         final Link link = addrEntry.getKey();
                         final InetAddress addr = addrEntry.getValue();
-                        writer.write(String.format("%s %f%n", addr.getHostAddress(), link.getBandwidth()));
+                        // always write the specified delay here so that DCOP
+                        // sees it
+                        writer.write(String.format("%s %f %f%n", addr.getHostAddress(), link.getBandwidth(),
+                                link.getDelay()));
                     }
                 } catch (final IOException e) {
                     throw new RuntimeException("Error writing " + filename, e);
@@ -2255,11 +2377,11 @@ public final class StageExperiment {
         copyResource("ansible/map-background-traffic.logging.xml", "map-background-traffic.logging.xml");
     }
 
-    private void createAnsibleHostsForEmulab(Node dockerRegistryNode) {
+    private void createAnsibleHostsForEmulab(final Node dockerRegistryNode) {
         createAnsibleHosts(dockerRegistryNode, "emulab", this::getEmulabHostnameFor);
     }
 
-    private void createAnsibleHostsForDcomp(Node dockerRegistryNode) {
+    private void createAnsibleHostsForDcomp(final Node dockerRegistryNode) {
         createAnsibleHosts(dockerRegistryNode, "dcomp", this::getDcompHostnameFor);
     }
 
@@ -2332,6 +2454,10 @@ public final class StageExperiment {
 
             writer.newLine();
 
+            writer.write("[agent_profile]");
+            writer.newLine();
+            writer.newLine();
+
         } catch (final IOException e) {
             throw new RuntimeException("Error writing ansible hosts file", e);
         }
@@ -2345,6 +2471,11 @@ public final class StageExperiment {
      * Port that AP will use to communicate.
      */
     public static final int AP_PORT = 50042;
+
+    /**
+     * Port that DCOP will use to communicate.
+     */
+    public static final int DCOP_PORT = AP_PORT + 1;
 
     /**
      * Also sets the global leader.
@@ -2368,6 +2499,7 @@ public final class StageExperiment {
         final Path destination = configOptions.outputFolder.resolve(HiFiAgent.GLOBAL_PROPERTIES_FILENAME);
         final Properties globalProperties = new Properties();
         globalProperties.setProperty(HiFiAgent.AP_PORT_PROPERTY_KEY, String.valueOf(AP_PORT));
+        globalProperties.setProperty(HiFiAgent.DCOP_PORT_PROPERTY_KEY, String.valueOf(DCOP_PORT));
 
         globalProperties.setProperty(HiFiAgent.DOCKER_REGISTRY_HOST_KEY, configOptions.dockerRegistryHostname);
 
@@ -2388,112 +2520,167 @@ public final class StageExperiment {
         return globalLeader;
     }
 
-    private void copyTopology() {
-        final Path source = configOptions.scenarioPath.resolve(NS2Parser.TOPOLOGY_FILENAME);
+    private void writeEmulabTopology() {
         final Path destination = configOptions.outputFolder.resolve(NS2Parser.TOPOLOGY_FILENAME);
-        final Pattern routePattern = Pattern.compile("^\\$(\\S+)\\s+rtproto\\s+\\S+$");
 
         try (BufferedWriter writer = Files.newBufferedWriter(destination)) {
 
-            Files.lines(source).forEach(line -> {
-                try {
-                    final Matcher routeMatcher = routePattern.matcher(line);
+            final Set<Link> pointToPoint = new HashSet<>();
+            final Set<Switch> lans = new HashSet<>();
 
-                    if (line.matches("^\\$.*\\s+run$")) {
-                        if (autoAssignIpAddresses) {
-                            writer.newLine();
+            writer.write(String.format("set ns [new Simulator]%n"));
+            writer.write(String.format("source tb_compat.tcl%n"));
+            writer.newLine();
 
-                            for (final Map.Entry<String, Node> nEntry : topology.getNodes().entrySet()) {
-                                final Node node = nEntry.getValue();
+            writer.write(String.format("# nodes%n"));
+            topology.getNodes().entrySet().stream().forEach(Errors.rethrow().wrap(entry -> {
+                final Node node = entry.getValue();
 
-                                writer.write(String.format("tb-set-node-os $%s UBUNTU18-64-MAP%n", node.getName()));
+                writer.write(String.format("set %s [$ns node]%n", node.getName(), node.getName()));
+                writer.write(String.format("tb-set-node-os $%s UBUNTU18-64-MAP%n", node.getName()));
 
-                                final String hardwareConfigName = node.getHardware();
-                                if (null != hardwareConfigName) {
-                                    final HardwareConfiguration hwConfig = hardwareConfigs.get(hardwareConfigName);
-                                    if (null == hwConfig) {
-                                        throw new RuntimeException("Node '" + node.getName() + "' specifies hardware '"
-                                                + hardwareConfigName
-                                                + "', but it is not specified in the hardware configurations file");
-                                    }
-                                    final String emulabConfig = hwConfig.getEmulabConfig();
-                                    if (null != emulabConfig) {
-                                        writer.write(String.format("tb-set-hardware $%s %s%n", node.getName(),
-                                                emulabConfig));
-                                    }
-                                }
-
-                                for (final Link link : node.getLinks()) {
-                                    final NetworkDevice other;
-                                    if (link.getLeft().equals(node)) {
-                                        other = link.getRight();
-                                    } else {
-                                        other = link.getLeft();
-                                    }
-
-                                    final String addr = node.getIpAddress(link).getHostAddress();
-                                    if (other instanceof Node) {
-                                        writer.write(String.format("tb-set-ip-link $%s $%s %s", node.getName(),
-                                                link.getName(), addr));
-                                    } else if (other instanceof Switch) {
-                                        final Switch sw = (Switch) other;
-                                        writer.write(String.format("tb-set-ip-lan $%s $%s %s", node.getName(),
-                                                sw.getName(), addr));
-                                    } else {
-                                        throw new RuntimeException(
-                                                "Unexpected NetworkDevice class " + other.getClass());
-                                    }
-                                    writer.newLine();
-                                } // foreach link
-                            } // foreach node
-
-                            writer.newLine();
-                        } // write addresses
-
-                        if (configOptions.enableFirewall) {
-                            writer.write("# ---- firewall config");
-                            writer.newLine();
-
-                            writer.write("# create a firewall node to protect the experiment");
-                            writer.newLine();
-                            writer.write("set fw [new Firewall $ns]");
-                            writer.newLine();
-                            // writer.write("$fw set-type ipfw2-vlan");
-                            writer.write("$fw set-type iptables-vlan");
-                            writer.newLine();
-                            writer.write("$fw set-style basic");
-                            writer.newLine();
-
-                            writer.write("# allow traceroute through so that emulab loading works");
-                            writer.newLine();
-                            writer.write("$fw add-rule \"allow udp from EMULAB_CNET to any 33434-33524\"");
-                            writer.newLine();
-                            writer.write("$fw add-rule \"allow udp from any 33434-33524 to EMULAB_CNET\"");
-                            writer.newLine();
-
-                            writer.write("# --- end firewall config");
-                            writer.newLine();
-                        }
-                    } else if (line.matches("^tb-set-hardware\\s+\\S+\\s+\\S+$")) {
-                        // skip hardware lines, these are from the lo-fi
-                        // simulation
-                        return;
-                    } else if (line.startsWith("tb-set-node-os")) {
-                        // skip node os lines, will be written out later
-                        return; // don't write out the original line
-                    } else if (routeMatcher.find()) {
-                        // always use Manual routing and therefore use quagga
-                        final String nsName = routeMatcher.group(1);
-                        writer.write(String.format("$%s rtproto Manual%n", nsName));
-                        return; // don't write out the original line
+                final String hardwareConfigName = node.getHardware();
+                if (null != hardwareConfigName) {
+                    final HardwareConfiguration hwConfig = hardwareConfigs.get(hardwareConfigName);
+                    if (null == hwConfig) {
+                        throw new RuntimeException(
+                                "Node '" + node.getName() + "' specifies hardware '" + hardwareConfigName
+                                        + "', but it is not specified in the hardware configurations file");
                     }
 
-                    writer.write(line);
-                    writer.newLine();
-                } catch (final IOException e) {
-                    throw new RuntimeException("Error writing topology file", e);
+                    final String emulabConfig = hwConfig.getEmulabConfig();
+                    if (null != emulabConfig) {
+                        writer.write(String.format("tb-set-hardware $%s %s%n", node.getName(), emulabConfig));
+                    }
                 }
-            });
+                writer.newLine();
+
+                // group the links and switches
+                node.getLinks().forEach(link -> {
+                    if (link.getLeft() instanceof Switch) {
+                        lans.add((Switch) link.getLeft());
+                    } else if (link.getRight() instanceof Switch) {
+                        lans.add((Switch) link.getRight());
+                    } else {
+                        pointToPoint.add(link);
+                    }
+                });
+            }));
+            writer.newLine();
+
+            writer.write(String.format("# network links%n"));
+            pointToPoint.stream().forEach(Errors.rethrow().wrap(link -> {
+                final double linkDelay;
+                if (configOptions.disableLinkDelay) {
+                    linkDelay = 0;
+                } else {
+                    linkDelay = link.getDelay();
+                }
+
+                writer.write(String.format("set %s [$ns duplex-link $%s $%s %fMb %fms DropTail]%n", link.getName(),
+                        link.getLeft().getName(), link.getRight().getName(), link.getBandwidth(), linkDelay));
+                writer.newLine();
+            }));
+
+            writer.write(String.format("# lans%n"));
+            lans.stream().forEach(Errors.rethrow().wrap(lan -> {
+                final double linkDelay;
+                if (configOptions.disableLinkDelay) {
+                    linkDelay = 0;
+                } else {
+                    linkDelay = lan.getDelay();
+                }
+
+                final String nodes = lan.getNodes().stream().map(Node::getName)
+                        .collect(Collectors.joining(" $", "$", ""));
+                writer.write(String.format("set %s [$ns make-lan \"%s\" %fMb %fms]%n", lan.getName(), nodes,
+                        lan.getBandwidth(), linkDelay));
+            }));
+            writer.newLine();
+
+            if (autoAssignIpAddresses) {
+                writer.newLine();
+
+                for (final Map.Entry<String, Node> nEntry : topology.getNodes().entrySet()) {
+                    final Node node = nEntry.getValue();
+
+                    for (final Link link : node.getLinks()) {
+                        final NetworkDevice other;
+                        if (link.getLeft().equals(node)) {
+                            other = link.getRight();
+                        } else {
+                            other = link.getLeft();
+                        }
+
+                        final String addr = node.getIpAddress(link).getHostAddress();
+                        if (other instanceof Node) {
+                            writer.write(
+                                    String.format("tb-set-ip-link $%s $%s %s", node.getName(), link.getName(), addr));
+                        } else if (other instanceof Switch) {
+                            final Switch sw = (Switch) other;
+                            writer.write(String.format("tb-set-ip-lan $%s $%s %s", node.getName(), sw.getName(), addr));
+                        } else {
+                            throw new RuntimeException("Unexpected NetworkDevice class " + other.getClass());
+                        }
+                        writer.newLine();
+                    } // foreach link
+                } // foreach node
+
+                writer.newLine();
+            } // write addresses
+
+            if (configOptions.mapControlNetwork) {
+                writer.write(String.format("# MAP control network%n"));
+
+                // MAP control lan
+                final String nodes = nodeToControlIp.keySet().stream().map(Node::getName).map(n -> "$" + n)
+                        .collect(Collectors.joining(" "));
+                writer.write(String.format("set %s [$ns make-lan \"%s\" %dMb 0.0ms]%n", MAP_CONTROL_LAN_NAME, nodes,
+                        MAP_CONTROL_BANDWIDTH_MBPS));
+
+                // set netmask for control network since it's not a
+                // class C
+                writer.write(String.format("tb-set-netmask %s \"%s\"%n", MAP_CONTROL_LAN_NAME, MAP_CONTROL_NETMASK));
+
+                nodeToControlIp.entrySet().stream().forEach(Errors.rethrow().wrap(entry -> {
+                    final Node node = entry.getKey();
+                    final InetAddress addr = entry.getValue();
+
+                    writer.write(String.format("tb-set-ip-lan $%s $%s %s%n", node.getName(), MAP_CONTROL_LAN_NAME,
+                            addr.getHostAddress()));
+                }));
+                writer.newLine();
+            }
+
+            if (configOptions.enableFirewall) {
+                writer.write("# ---- firewall config");
+                writer.newLine();
+
+                writer.write("# create a firewall node to protect the experiment");
+                writer.newLine();
+                writer.write("set fw [new Firewall $ns]");
+                writer.newLine();
+                // writer.write("$fw set-type ipfw2-vlan");
+                writer.write("$fw set-type iptables-vlan");
+                writer.newLine();
+                writer.write("$fw set-style basic");
+                writer.newLine();
+
+                writer.write("# allow traceroute through so that emulab loading works");
+                writer.newLine();
+                writer.write("$fw add-rule \"allow udp from EMULAB_CNET to any 33434-33524\"");
+                writer.newLine();
+                writer.write("$fw add-rule \"allow udp from any 33434-33524 to EMULAB_CNET\"");
+                writer.newLine();
+
+                writer.write("# --- end firewall config");
+                writer.newLine();
+            }
+            writer.newLine();
+
+            writer.write(String.format("$ns rtproto Manual%n"));
+            writer.write(String.format("$ns run%n"));
+
         } catch (final IOException e) {
             throw new RuntimeException("Error reading topology file", e);
         }
@@ -2514,6 +2701,28 @@ public final class StageExperiment {
             Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING);
         } catch (final IOException e) {
             throw new RuntimeException("Error copying service-configurations.json", e);
+        }
+    }
+
+    private void copyServiceDependencies() {
+        try {
+            final Path source;
+            if (null == configOptions.serviceConfigFile) {
+                source = configOptions.scenarioPath.resolve(Simulation.SERVICE_DEPENDENCIES_FILENAME);
+            } else {
+                source = Paths.get(configOptions.serviceConfigFile);
+            }
+            final Path destination = configOptions.outputFolder.resolve(Simulation.SERVICE_DEPENDENCIES_FILENAME);
+            if (Files.exists(source)) {
+                Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING);
+            } else {
+                try (BufferedWriter writer = Files.newBufferedWriter(destination)) {
+                    // write empty JSON array
+                    writer.write("[]");
+                }
+            }
+        } catch (final IOException e) {
+            throw new RuntimeException("Error copying/writing service-dependencies.json", e);
         }
     }
 
@@ -2544,7 +2753,9 @@ public final class StageExperiment {
                 "create-swap.sh", //
                 "00-setup_dcomp.yml", //
                 "01-ansible-packages.yml", //
-                "02-failsafe-dns.yml", //
+                "02-base-networking.yml", //
+                "02-failsafe-dns_emulab.yml", //
+                "02-failsafe-dns_dcomp.yml", //
                 "start_network_interfaces.py", //
                 "04-install-services.yml", //
                 "05-cleanup.yml", //
@@ -2555,27 +2766,39 @@ public final class StageExperiment {
                 "12-setup-ncps.yml", //
                 "get_container_veth.sh", //
                 "13-setup-clients.yml", //
+                "15-copy-flink-traces_dcomp.yml", //
+                "15-copy-flink-traces_emulab.yml", //
                 "40-start_registry.yml", //
                 "45-client-pre-start.yml", //
                 "50-start_map_agent.yml", //
                 "90-gather-node-data.yml", //
-                "99-ip_forwarding.conf", //
                 "docker-map.conf", //
                 "stop_map_agent.yml", //
                 "stop_map_agent.yml", //
-                "wait_for_dynamic_routing.yml", //
                 "flow-install.yml", //
                 "flow-start.yml", //
                 "flow-stop.yml", //
-                "excluded-subnets.txt", //
+                "testbed-control-subnets.txt", //
                 "fetch_images.yml", //
                 "clear-docker.yml", //
                 "start_background_traffic.yml", //
                 "stop_background_traffic.yml", //
                 "daemon.json", //
-        }).forEach(filename -> {
-            copyResource("ansible/" + filename, filename);
-        });
+                "update_agent_jar.yml", //
+                "master-playbook-01.yml", //
+                "master-playbook-01.1.yml", //
+                "master-playbook-02.yml", //
+                "master-playbook-02.1.yml", //
+                "master-playbook-03.yml", //
+                "master-playbook-04.yml", //
+                "iftop.yml", //
+                "build-iftop.sh", //
+                "prioritize_c2_traffic.py", //
+                "traffic-shaping.yml" }).forEach(filename -> {
+                    copyResource("ansible/" + filename, filename);
+                });
+
+        copyResource("iftop.tar.gz", "iftop.tar.gz");
     }
 
     private static String localPropertiesFileFor(final Node node) {
@@ -2607,6 +2830,7 @@ public final class StageExperiment {
 
     private void copySystemdService() {
         copyResource("ansible/map-agent.service", "map-agent.service");
+        copyResource("ansible/map-agent.profile.service", "map-agent.profile.service");
         copyResource("ansible/background-traffic-driver.service", "background-traffic-driver.service");
     }
 
@@ -2647,9 +2871,10 @@ public final class StageExperiment {
      * Writes out the files necessary for creating a registry certificate and
      * running the registry.
      */
-    private void writeRegistryInformation() {
+    private void writeRegistryInformation(final Node dockerRegistryNode) {
         if (configOptions.outputFolder.resolve("registry").toFile().mkdirs()) {
-            writeOpenSSLConfigFile("ansible/registry/openssl_map.cnf.template", "registry/openssl_map.cnf");
+            writeOpenSSLConfigFile(dockerRegistryNode, "ansible/registry/openssl_map.cnf.template",
+                    "registry/openssl_map.cnf");
             copyResource("ansible/registry/gen_cert_map.sh", "registry/gen_cert_map.sh", true);
             copyResource("ansible/registry/config2.yml", "registry/config2.yml");
             copyResource("ansible/registry/run_docker_registry_map.sh", "registry/run_docker_registry_map.sh", true);
@@ -2676,7 +2901,9 @@ public final class StageExperiment {
      * @param destPath
      *            the destination path of the custom certificate file
      */
-    private void writeOpenSSLConfigFile(final String resourcePath, final String destPath) {
+    private void writeOpenSSLConfigFile(final Node dockerRegistryNode,
+            final String resourcePath,
+            final String destPath) {
         try {
             InputStream source = Thread.currentThread().getContextClassLoader().getResource(resourcePath).openStream();
             Path destination = configOptions.outputFolder.resolve(destPath);
@@ -2690,33 +2917,25 @@ public final class StageExperiment {
                             writer.newLine();
 
                             if (line.matches(Pattern.quote("[alt_names]"))) {
-                                List<Node> nodes = new ArrayList<>();
-                                nodes.addAll(topology.getNodes().values());
+                                int counter = 1;
+                                writer.write(String.format("DNS.%d = %s%n", counter, dockerRegistryNode.getName()));
+                                ++counter;
 
-                                writer.newLine();
+                                writer.write(String.format("DNS.%d = %s%n", counter,
+                                        getEmulabHostnameFor(dockerRegistryNode)));
+                                ++counter;
 
-                                for (int n = 0; n < nodes.size(); n++) {
-                                    writer.write("DNS." + (n + 1) + " = " + nodes.get(n).getName());
-                                    writer.newLine();
-                                }
+                                writer.write(String.format("DNS.%d = %s%n", counter,
+                                        getDcompHostnameFor(dockerRegistryNode)));
+                                ++counter;
 
-                                writer.newLine();
+                                writer.write(String.format("DNS.%d = %s.%s%n", counter, dockerRegistryNode.getName(),
+                                        DnsUtils.MAP_CONTROL_TLD));
+                                ++counter;
 
-                                for (int n = 0; n < nodes.size(); n++) {
-                                    writer.write("DNS." + (nodes.size() + n + 1) + " = "
-                                            + getEmulabHostnameFor(nodes.get(n)));
-                                    writer.write("DNS." + (nodes.size() + n + 1) + " = "
-                                            + getDcompHostnameFor(nodes.get(n)));
-                                    writer.newLine();
-                                }
-
-                                writer.newLine();
-
-                                for (int n = 0; n < nodes.size(); n++) {
-                                    writer.write("DNS." + (2 * nodes.size() + n + 1) + " = " + nodes.get(n).getName()
-                                            + "." + DnsUtils.MAP_TLD);
-                                    writer.newLine();
-                                }
+                                writer.write(String.format("DNS.%d = %s.%s%n", counter, dockerRegistryNode.getName(),
+                                        DnsUtils.MAP_TLD));
+                                ++counter;
                             }
                         } catch (IOException e) {
                             throw new RuntimeException("Error writing openssl configuration file", e);
@@ -2820,30 +3039,32 @@ public final class StageExperiment {
         }
 
         writeMapZone(region, dnsNode);
+        writeMapControlZone(region, dnsNode);
         writeRegionZone(region, dnsNode);
         writeReverseZones(dnsNode);
-        writeConfigTemplate(dnsNode);
+        writeConfigTemplate("dcomp", dnsNode);
+        writeConfigTemplate("emulab", dnsNode);
     }
 
-    private void writeConfigTemplate(final Node dnsNode) throws IOException {
+    private void writeConfigTemplate(final String testbed, final Node dnsNode) throws IOException {
         final Path configDir = configOptions.outputFolder
                 .resolve(String.format("dns/%s/conf", getBaseFilenameForNode(dnsNode)));
         if (!Files.exists(configDir)) {
             Files.createDirectories(configDir);
         }
 
-        final Path destination = configDir.resolve("config.xml");
+        final Path destination = configDir.resolve(String.format("config_%s.xml", testbed));
         try (InputStream stream = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream("ansible/dns/conf/config.template.xml")) {
+                .getResourceAsStream(String.format("ansible/dns/conf/config_%s.template.xml", testbed))) {
             Objects.requireNonNull(stream, "Cannot find resource ansible/dns/conf/config.template.xml");
 
             final StringWriter swriter = new StringWriter();
             IOUtils.copy(stream, swriter, Charset.defaultCharset());
             final String rawTemplate = swriter.toString();
 
-            final InetAddress primaryIp = nodeToPrimaryIp.get(dnsNode);
+            final InetAddress listenAddress = nodeToControlIp.get(dnsNode);
 
-            final String nodeTemplate = rawTemplate.replaceAll("PRIMARY_IP_ADDRESS", primaryIp.getHostAddress());
+            final String nodeTemplate = rawTemplate.replaceAll("LISTEN_ADDRESS", listenAddress.getHostAddress());
 
             try (BufferedWriter writer = Files.newBufferedWriter(destination, StandardOpenOption.CREATE,
                     StandardOpenOption.TRUNCATE_EXISTING)) {
@@ -2853,9 +3074,6 @@ public final class StageExperiment {
         } catch (final IOException e) {
             throw new RuntimeException("Error writing " + destination.toString(), e);
         }
-
-        copyResource("ansible/dns/conf/config.template.xml", "dns/conf/config.template.xml");
-
     }
 
     private void writeReverseZones(final Node dnsNode) throws IOException {
@@ -2923,7 +3141,8 @@ public final class StageExperiment {
             writer.write(String.format(")%n"));
             writer.write(String.format("\tNS  %s.%s.%n", dnsNode.getName(), DnsUtils.MAP_TLD));
             writer.write(String.format("$ORIGIN %s.%s.%n", region, DnsUtils.MAP_TLD));
-            writer.write(String.format("@       IN      NS      %s.%s.%n", dnsNode.getName(), DnsUtils.MAP_TLD));
+            writer.write(
+                    String.format("@       IN      NS      %s.%s.%n", dnsNode.getName(), DnsUtils.MAP_CONTROL_TLD));
         }
 
     }
@@ -2933,7 +3152,7 @@ public final class StageExperiment {
 
         try (BufferedWriter writer = Files.newBufferedWriter(csvPath)) {
             writer.write(String.format("host,ip%n"));
-            
+
             for (final Map.Entry<Node, InetAddress> entry : nodeToPrimaryIp.entrySet()) {
                 final Node node = entry.getKey();
                 final String nodeName = node.getName();
@@ -2947,8 +3166,7 @@ public final class StageExperiment {
                         final InetAddress containerAddress = centry.getKey();
                         final String baseContainerName = centry.getValue();
 
-                        writer.write(
-                                String.format("%s,%s%n", baseContainerName, containerAddress.getHostAddress()));
+                        writer.write(String.format("%s,%s%n", baseContainerName, containerAddress.getHostAddress()));
                     } // foreach container
                 } // if server
 
@@ -3011,12 +3229,72 @@ public final class StageExperiment {
 
                     for (final Node regionDnsNode : entry.getValue()) {
                         writer.write(String.format("@       IN      NS      %s.%s.%n", regionDnsNode.getName(),
-                                DnsUtils.MAP_TLD));
+                                DnsUtils.MAP_CONTROL_TLD));
                     }
                     writer.newLine();
                 }
             } // foreach region
         } // writer
+
+    }
+
+    private void writeMapControlZone(final String thisRegion, final Node dnsNode) throws IOException {
+        final Path mapZonePath = configOptions.outputFolder
+                .resolve(String.format("dns/%s/zones/%s", getBaseFilenameForNode(dnsNode), DnsUtils.MAP_CONTROL_TLD));
+
+        try (BufferedWriter writer = Files.newBufferedWriter(mapZonePath)) {
+            writer.write(String.format("$ORIGIN .%n"));
+            writer.write(String.format("$TTL %d%n", DEFAULT_TTL));
+            writer.write(String.format("%s IN SOA  ns.%s. hostmaster.%s. (%n", DnsUtils.MAP_CONTROL_TLD,
+                    DnsUtils.MAP_CONTROL_TLD, DnsUtils.MAP_CONTROL_TLD));
+            writer.write(String.format("\t2018020504 ; serial%n"));
+            writer.write(String.format("\t28800      ; refresh (8 hours)%n"));
+            writer.write(String.format("\t7200       ; retry (2 hours)%n"));
+            writer.write(String.format("\t2419200    ; expire (4 weeks)%n"));
+            writer.write(String.format("\t86400      ; minimum (1 day)%n"));
+            writer.write(String.format(")%n"));
+            writer.write(String.format("\tNS  ns.%s.%n", DnsUtils.MAP_CONTROL_TLD));
+            writer.write(String.format("$ORIGIN %s.%n", DnsUtils.MAP_CONTROL_TLD));
+
+            final InetAddress dnsPrimaryIp = nodeToControlIp.get(dnsNode);
+            writer.write(String.format("ns\t\tA %s ; node running dns handler for the region%n",
+                    dnsPrimaryIp.getHostAddress()));
+
+            for (final Map.Entry<Node, InetAddress> entry : nodeToControlIp.entrySet()) {
+                final Node node = entry.getKey();
+                final String nodeName = node.getName();
+                final InetAddress addr = entry.getValue();
+                writer.write(String.format("%s\tA\t%s%n", nodeName, addr.getHostAddress()));
+            } // foreach node
+        } // writer
+
+        if (configOptions.mapControlNetwork) {
+            // reverse zones
+            final String reverseFilename = String.format("%d.%d.in-addr.arpa", HiFiAgent.MAP_CONTROL_SECOND_OCTET,
+                    HiFiAgent.MAP_CONTROL_FIRST_OCTET);
+            final Path zonePath = configOptions.outputFolder
+                    .resolve(String.format("dns/%s/zones/%s", getBaseFilenameForNode(dnsNode), reverseFilename));
+            try (BufferedWriter writer = Files.newBufferedWriter(zonePath)) {
+                writer.write(String.format("$TTL    %d%n", DEFAULT_TTL));
+                writer.write(String.format("@   IN  SOA localhost. root.localhost. (%n"));
+                writer.write(String.format("\t1     ; Serial%n"));
+                writer.write(String.format("\t604800     ; Refresh%n"));
+                writer.write(String.format("\t86400     ; Retry%n"));
+                writer.write(String.format("\t2419200     ; Expire%n"));
+                writer.write(String.format("\t604800 )   ; Negative Cache TTL%n"));
+                writer.write(String.format(";%n"));
+                writer.write(String.format("@   IN  NS  ns.%n"));
+
+                for (final Map.Entry<Node, InetAddress> entry : nodeToControlIp.entrySet()) {
+                    final InetAddress nodeAddress = entry.getValue();
+                    final Node node = entry.getKey();
+                    final int[] nodeOctets = Address.toArray(nodeAddress.getHostAddress());
+
+                    writer.write(String.format("%d.%d.%d.%d.in-addr.arpa. IN PTR %s.%s.%n", nodeOctets[3],
+                            nodeOctets[2], nodeOctets[1], nodeOctets[0], node.getName(), DnsUtils.MAP_CONTROL_TLD));
+                } // foreach node in subnet
+            } // writer
+        }
 
     }
 
@@ -3038,43 +3316,16 @@ public final class StageExperiment {
     }
 
     /**
+     * Note: assumes class C subnets, see {@link #getSubnetPrefix(InetAddress)}.
      * 
      * @param subnet
      *            the subnet to get the filename for
      * @return the base filename
      */
     private String getSubnetReverseFilename(final Subnet subnet) {
-        // Note: assumes class C subnets, see getSubnetPrefix
         final int[] octets = Address.toArray(subnet.getPrefix().getHostAddress());
-
         final String filename = String.format("%d.%d.%d.in-addr.arpa", octets[2], octets[1], octets[0]);
         return filename;
-    }
-
-    private void writeResolveConfHead() throws IOException {
-        final Path resolveConfHeadDir = configOptions.outputFolder.resolve("dns/resolv.conf.d-head");
-        if (!Files.exists(resolveConfHeadDir)) {
-            Files.createDirectories(resolveConfHeadDir);
-        }
-
-        for (final Map.Entry<String, Node> entry : topology.getNodes().entrySet()) {
-            final Node node = entry.getValue();
-            if (!MapUtils.isUnderlay(node)) {
-                final Path nodePath = resolveConfHeadDir.resolve(getBaseFilenameForNode(node));
-                final String region = nodeToRegion.get(node);
-                final Set<Node> dnsServers = regionToDns.get(region);
-                Objects.requireNonNull(dnsServers, String.format("Region %s doesn't have any DNS servers", region));
-
-                try (BufferedWriter writer = Files.newBufferedWriter(nodePath)) {
-                    for (final Node dnsNode : dnsServers) {
-                        final InetAddress primaryIp = nodeToPrimaryIp.get(dnsNode);
-                        writer.write(String.format("nameserver %s%n", primaryIp.getHostAddress()));
-                    } // foreach DNS server
-
-                    writer.write(String.format("search %s%n", DnsUtils.MAP_TLD));
-                } // using writer
-            } // not underlay
-        } // foreach node
     }
 
     private static final class RouterIdGenerator {
@@ -3121,6 +3372,7 @@ public final class StageExperiment {
 
         copyResource("ansible/16-setup-quagga.yml", "16-setup-quagga.yml");
         copyResource("ansible/stop-quagga.yml", "stop-quagga.yml");
+        copyResource("ansible/quagga/quagga.logrotate", "quagga/quagga.logrotate");
 
         final RouterIdGenerator idGen = new RouterIdGenerator();
         for (final Map.Entry<String, Node> entry : topology.getNodes().entrySet()) {
@@ -3155,6 +3407,10 @@ public final class StageExperiment {
         } // foreach node
 
     }
+
+    private static final String MAP_CONTROL_LAN_NAME = "mapcontrol";
+
+    private static final int MAP_CONTROL_BANDWIDTH_MBPS = 100;
 
     private void writeDcompPython() throws IOException {
         final Path output = configOptions.outputFolder.resolve("dcomp-topology.py");
@@ -3205,9 +3461,17 @@ public final class StageExperiment {
 
             writer.write(String.format("%n# network links%n"));
             pointToPoint.stream().forEach(Errors.rethrow().wrap(link -> {
+                final double linkDelay;
+                if (configOptions.disableLinkDelay) {
+                    linkDelay = 0;
+                } else {
+                    linkDelay = link.getDelay();
+                }
+
                 writer.write(String.format(
-                        "%s = topology.connect([%s, %s], mergexp.net.capacity == mergexp.unit.mbps(%f))%n",
-                        link.getName(), link.getLeft().getName(), link.getRight().getName(), link.getBandwidth()));
+                        "%s = topology.connect([%s, %s], mergexp.net.capacity == mergexp.unit.mbps(%f), mergexp.net.latency == mergexp.unit.ms(%f))%n",
+                        link.getName(), link.getLeft().getName(), link.getRight().getName(), link.getBandwidth(),
+                        linkDelay));
 
                 // given that these are point to point links we know that left
                 // and right are both Node objects
@@ -3221,9 +3485,15 @@ public final class StageExperiment {
 
             lans.stream().forEach(Errors.rethrow().wrap(lan -> {
                 final String nodes = lan.getNodes().stream().map(Node::getName).collect(Collectors.joining(","));
-                writer.write(
-                        String.format("%s = topology.connect([%s], mergexp.net.capacity == mergexp.unit.mbps(%f))%n",
-                                lan.getName(), nodes, lan.getBandwidth()));
+                final double linkDelay;
+                if (configOptions.disableLinkDelay) {
+                    linkDelay = 0;
+                } else {
+                    linkDelay = lan.getDelay();
+                }
+                writer.write(String.format(
+                        "%s = topology.connect([%s], mergexp.net.capacity == mergexp.unit.mbps(%f), mergexp.net.latency == mergexp.unit.ms(%f))%n",
+                        lan.getName(), nodes, lan.getBandwidth(), linkDelay));
 
                 lan.getLinks().entrySet().stream().forEach(Errors.rethrow().wrap(entry -> {
                     final Node node = entry.getKey();
@@ -3235,6 +3505,22 @@ public final class StageExperiment {
 
                 writer.write(String.format("%n"));
             }));
+
+            if (configOptions.mapControlNetwork) {
+                // control network
+                final String nodes = nodeToControlIp.keySet().stream().map(Node::getName)
+                        .collect(Collectors.joining(","));
+                writer.write(String.format("%s = topology.connect([%s])%n", MAP_CONTROL_LAN_NAME, nodes));
+
+                nodeToControlIp.entrySet().stream().forEach(Errors.rethrow().wrap(entry -> {
+                    final Node node = entry.getKey();
+                    final InetAddress addr = entry.getValue();
+
+                    writer.write(String.format("%s[%s].ip.addrs = ['%s/%d']%n", MAP_CONTROL_LAN_NAME, node.getName(),
+                            addr.getHostAddress(), MAP_CONTROL_NETMASK_LENGTH));
+                }));
+                writer.write(String.format("%n"));
+            }
 
             writer.write(String.format("%nmergexp.experiment(topology)%n"));
         } // allocate writer
@@ -3301,7 +3587,7 @@ public final class StageExperiment {
                 final InetAddress leftAddr = leftNode.getIpAddress(link);
 
                 final String leftInterface = createEmulabPythonInterface(writer, leftNode, leftAddr, link.getName(),
-                        link.getBandwidth());
+                        link.getBandwidth(), NETMASK);
 
                 writer.write(String.format("%s.addInterface(%s)%n", link.getName(), leftInterface));
 
@@ -3309,7 +3595,7 @@ public final class StageExperiment {
                 final InetAddress rightAddr = rightNode.getIpAddress(link);
 
                 final String rightInterface = createEmulabPythonInterface(writer, rightNode, rightAddr, link.getName(),
-                        link.getBandwidth());
+                        link.getBandwidth(), NETMASK);
 
                 writer.write(String.format("%s.addInterface(%s)%n", link.getName(), rightInterface));
 
@@ -3325,13 +3611,29 @@ public final class StageExperiment {
                     final InetAddress addr = node.getIpAddress(link);
 
                     final String ifce = createEmulabPythonInterface(writer, node, addr, lan.getName(),
-                            lan.getBandwidth());
+                            lan.getBandwidth(), NETMASK);
 
                     writer.write(String.format("%s.addInterface(%s)%n", lan.getName(), ifce));
                 }));
 
                 writer.write(String.format("%n"));
             }));
+
+            if (configOptions.mapControlNetwork) {
+                writer.write(
+                        String.format("%s = request.LAN(name='%s')%n", MAP_CONTROL_LAN_NAME, MAP_CONTROL_LAN_NAME));
+
+                nodeToControlIp.entrySet().stream().forEach(Errors.rethrow().wrap(entry -> {
+                    final Node node = entry.getKey();
+                    final InetAddress addr = entry.getValue();
+
+                    final String ifce = createEmulabPythonInterface(writer, node, addr, MAP_CONTROL_LAN_NAME,
+                            MAP_CONTROL_BANDWIDTH_MBPS, MAP_CONTROL_NETMASK);
+
+                    writer.write(String.format("%s.addInterface(%s)%n", MAP_CONTROL_LAN_NAME, ifce));
+                }));
+                writer.write(String.format("%n"));
+            }
 
             writer.write(String.format("%nportal.context.printRequestRSpec()%n"));
         } // allocate writer
@@ -3345,11 +3647,12 @@ public final class StageExperiment {
             final Node node,
             final InetAddress addr,
             final String lanOrLinkName,
-            final double mbps) throws IOException {
+            final double mbps,
+            final String netmask) throws IOException {
         final String interfaceName = String.format("%s_%s", node.getName(), lanOrLinkName);
 
         writer.write(String.format("%s = %s.addInterface(name='%s', address=pg.IPv4Address('%s', '%s'))%n",
-                interfaceName, node.getName(), lanOrLinkName, addr.getHostAddress(), NETMASK));
+                interfaceName, node.getName(), lanOrLinkName, addr.getHostAddress(), netmask));
         writer.write(String.format("%s.bandwidth = %f%n", interfaceName, mbpsToEmulabPython(mbps)));
         return interfaceName;
     }
@@ -3375,7 +3678,11 @@ public final class StageExperiment {
      * @return the subnet prefix as an address
      */
     private static InetAddress getSubnetPrefix(final InetAddress addr) {
-        final InetAddress subnetAddress = Address.truncate(addr, NETMASK_LENGTH);
+        return getSubnetPrefix(addr, NETMASK_LENGTH);
+    }
+
+    private static InetAddress getSubnetPrefix(final InetAddress addr, final int netmaskLength) {
+        final InetAddress subnetAddress = Address.truncate(addr, netmaskLength);
         return subnetAddress;
     }
 
@@ -3387,6 +3694,12 @@ public final class StageExperiment {
      * Needs to match {@link #NETMASK_LENGTH}.
      */
     private static final String NETMASK = "255.255.255.0";
+
+    private static final int MAP_CONTROL_NETMASK_LENGTH = 16;
+    /**
+     * Needs to match {@link #MAP_CONTROL_NETMASK_LENGTH}.
+     */
+    private static final String MAP_CONTROL_NETMASK = "255.255.0.0";
 
     /**
      * Track the addresses used in a subnet.

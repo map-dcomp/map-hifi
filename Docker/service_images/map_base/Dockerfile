@@ -1,16 +1,13 @@
 # Dockerfile for MAP base image
 
 # Pull base image
-FROM ubuntu:16.04
+FROM ubuntu:20.04
 
 
 # Install Java
-# Oracle Java 8 Dockerfile
-# https://github.com/dockerfile/java
-# https://github.com/dockerfile/java/tree/master/oracle-java8
 RUN apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y  openjdk-8-jdk && \
+    apt-get install -y  openjdk-11-jdk && \
     apt-get clean
 
 

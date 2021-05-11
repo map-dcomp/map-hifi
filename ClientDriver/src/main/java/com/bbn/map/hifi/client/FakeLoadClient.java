@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -50,13 +50,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
+import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.xbill.DNS.Address;
 
-import com.bbn.map.hifi.apps.fake_load_server.FakeLoadServer;
-import com.bbn.map.hifi.apps.fake_load_server.NetworkLoadGeneration;
+import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi.util.SimAppUtils;
+import com.bbn.map.hifi.util.network.TrafficGenerator;
 import com.bbn.map.simulator.ClientLoad;
 import com.bbn.map.utils.JsonUtils;
 import com.bbn.protelis.networkresourcemanagement.LinkAttribute;
@@ -85,6 +85,8 @@ public class FakeLoadClient implements JavaClient {
             "latency", "expected_duration" };
 
     private final ExecutorService threadPool;
+
+    private TrafficGenerator networkGenerator;
 
     private static Logger getLogger(final String host) {
         return LogManager.getLogger(String.format("%s.%s", FakeLoadClient.class.getName(), host));
@@ -128,9 +130,14 @@ public class FakeLoadClient implements JavaClient {
     public void stop() {
         logger.trace("Stopping client");
         done.set(true);
+        if (null != networkGenerator) {
+            networkGenerator.shutdown();
+        }
     }
 
     private static final int MAX_ATTEMPTS = 3;
+
+    private static final int CONNECT_TIMEOUT_MS = 60 * 1000;
 
     @Override
     public void run() {
@@ -145,13 +152,22 @@ public class FakeLoadClient implements JavaClient {
             String errorMessage = null;
             Throwable exception = null;
             InetAddress addr = null;
+            long getByNameStartTime = Long.MAX_VALUE;
+            long getByNameDuration;
             try {
                 // explicitly do the DNS resolution so that we can
                 // write the IP of the server into the log
-                addr = Address.getByName(host);
+                getByNameStartTime = System.currentTimeMillis();
+                addr = DnsUtils.getByName(host);
+                getByNameDuration = System.currentTimeMillis() - getByNameStartTime;
+
+                logger.debug("duration of successful Address.getByName({}): {} ms", host, getByNameDuration);
                 logger.info("Connecting to {}", addr);
 
-                try (SocketChannel channel = SocketChannel.open(new InetSocketAddress(addr, FakeLoadServer.PORT))) {
+                try (SocketChannel channel = SocketChannel.open();
+                        CloseableThreadContext.Instance ignored = CloseableThreadContext.push(channel.toString())) {
+                    channel.socket().connect(new InetSocketAddress(addr, SimAppUtils.FAKE_LOAD_SERVER_PORT),
+                            CONNECT_TIMEOUT_MS);
 
                     final ObjectMapper mapper = JsonUtils.getStandardMapObjectMapper()
                             .disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET)
@@ -167,9 +183,8 @@ public class FakeLoadClient implements JavaClient {
 
                         logger.info("Generating {} mbps network traffic", rx);
 
-                        final NetworkLoadGeneration generator = new NetworkLoadGeneration(null, threadPool, rx,
-                                networkDuration, channel);
-                        final Future<?> future = threadPool.submit(generator);
+                        networkGenerator = new TrafficGenerator(threadPool, rx, networkDuration, channel);
+                        final Future<?> future = threadPool.submit(networkGenerator);
                         try {
                             future.get();
                         } catch (final ExecutionException e) {
@@ -188,10 +203,24 @@ public class FakeLoadClient implements JavaClient {
                             logger.error("Error writing to the latency log", e);
                         }
 
-                        writeRequestStatus(requestStart, addr, true, null);
+                        // wait for the network generator to shutdown
+                        try {
+                            networkGenerator.waitForShutdown();
+                        } catch (final InterruptedException e) {
+                            logger.error("Interrupted waiting for shutdown", e);
+                        }
+
+                        // the request is successful if the traffic generator
+                        // did not read a failure message
+                        final boolean status = !networkGenerator.readFailureMessage();
+                        logger.info("Request completed. Read failure: {} Read success: {}",
+                                networkGenerator.readFailureMessage(), networkGenerator.readSuccessMessage());
+                        writeRequestStatus(requestStart, addr, status, null);
 
                         // note that the request finished
                         done.set(true);
+
+                        logger.debug("Finished with status, closing output stream using try");
                     } catch (final InterruptedException e) {
                         writeRequestStatus(requestStart, addr, false, "interrupted");
 
@@ -201,6 +230,8 @@ public class FakeLoadClient implements JavaClient {
                             logger.warn("Interrupted waiting for the generator to finish", e);
                         }
                     }
+
+                    logger.debug("Finished with status, closing channel using try");
                 } // socket allocation
 
             } catch (final UnsupportedEncodingException e) {
@@ -210,8 +241,9 @@ public class FakeLoadClient implements JavaClient {
                 done.set(true);
             } catch (final UnknownHostException e) {
                 writeRequestStatus(requestStart, addr, false, "unknown host");
+                getByNameDuration = System.currentTimeMillis() - getByNameStartTime;
 
-                errorMessage = String.format("Unable to find host %s.", host);
+                errorMessage = String.format("Unable to find host %s after %d ms.", host, getByNameDuration);
                 exception = e;
             } catch (final SocketException e) {
                 writeRequestStatus(requestStart, addr, false, "socket error");
@@ -227,6 +259,7 @@ public class FakeLoadClient implements JavaClient {
                 if (null != errorMessage) {
                     if (!done.get()) {
                         if (MAX_ATTEMPTS == attempt + 1) {
+                            logger.error("{}", errorMessage, exception);
                             logger.error("All attempts to connect have failed");
                         } else {
                             final long retryDelay = SimAppUtils.getClientRetryDelay();
@@ -246,6 +279,17 @@ public class FakeLoadClient implements JavaClient {
         } // foreach attempt
 
         logger.info("Finished request {}", request);
+        try {
+            latencyLog.close();
+        } catch (final IOException e) {
+            logger.debug("Error closing latency log on exit.", e);
+        }
+        try {
+            requestStatus.close();
+        } catch (final IOException e) {
+            logger.debug("Error closing request status file on exit.", e);
+        }
+
     }
 
     private void writeLatencyLog(final InetAddress address,

@@ -1,12 +1,18 @@
 - hosts: all
   become: yes
   tasks:
+    - name: Install quagga log rotate config
+      copy:
+        src: quagga/quagga.logrotate
+        dest: /etc/logrotate.d/quagga
+        owner: root
+        mode: u=rw,g=r,o=r
     - name: Install zebra.conf
       copy:
         src: quagga/zebra.conf.{{inventory_hostname_short}}
         dest: /etc/quagga/zebra.conf
         owner: quagga
-        mode: 0444       
+        mode: 0444
     - name: Install ospfd.conf
       copy:
         src: quagga/ospfd.conf.{{inventory_hostname_short}}
@@ -24,10 +30,8 @@
         name: zebra
         state: restarted
         enabled: yes
-        daemon-reload: yes
     - name: restart ospfd
       systemd:
         name: ospfd
         state: restarted
         enabled: yes
-        daemon-reload: yes

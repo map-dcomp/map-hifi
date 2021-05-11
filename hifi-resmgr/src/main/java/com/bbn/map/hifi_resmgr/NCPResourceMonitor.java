@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -62,17 +62,20 @@ import javax.annotation.Nonnull;
 
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.net.util.SubnetUtils;
+import org.apache.commons.net.util.SubnetUtils.SubnetInfo;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.xbill.DNS.Address;
 
+import com.bbn.map.AgentConfiguration;
 import com.bbn.map.Controller;
 import com.bbn.map.appmgr.util.AppMgrUtils;
 import com.bbn.map.common.value.ApplicationCoordinates;
 import com.bbn.map.common.value.ApplicationSpecification;
 import com.bbn.map.hifi.FileRegionLookupService;
+import com.bbn.map.hifi.HiFiAgent;
 import com.bbn.map.hifi.dns.WeightedRecordMessageServer;
 import com.bbn.map.hifi.simulation.SimDriver;
+import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi.util.IdentifierUtils;
 import com.bbn.map.hifi.util.UnitConversions;
 import com.bbn.map.utils.MAPServices;
@@ -125,7 +128,7 @@ public class NCPResourceMonitor {
     private static final ImmutableSet<String> MULTICAST_MANAGEMENT_ADDRESSES = ImmutableSet.of("224.0.0.1",
             "224.0.0.22");
 
-    private final ImmutableCollection<SubnetUtils.SubnetInfo> excludedSubnets;
+    private final ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets;
 
     // Polling
     private final long pollingInterval;
@@ -145,11 +148,8 @@ public class NCPResourceMonitor {
     private long usedMemory; // memory usage in KB
 
     // Network information
-    private List<String[]> networkRouteInformation = new ArrayList<String[]>(); // route
-                                                                                // information
     private RoutingTable routingTable = new RoutingTable();
-    private List<String> nicList = new ArrayList<>(); // list of all NICs found
-                                                      // on the system
+    private final Object routingTableLock = new Object();
 
     // (bridge -> [members], member -> bridge)
     private Pair<Map<NetworkInterface, Collection<NetworkInterface>>, Map<NetworkInterface, NetworkInterface>> bridgeInfo;
@@ -234,23 +234,23 @@ public class NCPResourceMonitor {
      *            local vs. remote traffic
      * @param apPort
      *            the port number that AP communicates on
-     * @param excludedSubnets
-     *            the subnets to ignore when monitoring network traffic
+     * @param testbedControlSubnets
+     *            the subnets used by the testbed for control traffic
      */
     public NCPResourceMonitor(long pollingInterval,
             @Nonnull final RegionIdentifier region,
             @Nonnull final FileRegionLookupService regionLookupService,
             final int apPort,
-            @Nonnull final ImmutableCollection<SubnetUtils.SubnetInfo> excludedSubnets) {
+            @Nonnull final ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets) {
         this.pollingInterval = pollingInterval;
         this.regionLookupService = regionLookupService;
         this.region = region;
         this.apPort = apPort;
-        this.excludedSubnets = excludedSubnets;
+        this.testbedControlSubnets = testbedControlSubnets;
 
         updateCPUCount(FILE_CPU_CAPACITY);
         updateNetworkBandwidth(FILE_NETWORK_CAPACITY);
-        // updateNetworkRouteInformation(FILE_NETWORK_ROUTE_INFORMATION);
+        updateNetworkRouteInformation(FILE_NETWORK_ROUTE_INFORMATION);
 
         startPolling();
     }
@@ -344,12 +344,21 @@ public class NCPResourceMonitor {
         return allNics.stream()//
                 // skip docker containers
                 .filter(nic -> !isDockerContainer(nic)) //
+
                 // skip docker bridges
                 .filter(nic -> !isDockerBridge(nic))//
-                // skip excluded addresses
-                .filter(nic -> nic.getInterfaceAddresses().stream()
-                        .noneMatch(ia -> isInterfaceInExcludedSubnets(excludedSubnets, ia.getAddress()))) //
-                .filter(this::hasIpv4Address) //
+
+                // skip loopback and excluded addresses, unless AP is using the
+                // control
+                // network
+                .filter(nic -> nic.getInterfaceAddresses().stream() //
+                        .map(InterfaceAddress::getAddress) //
+                        .noneMatch(this::isInterfaceInExcludedSubnets)) //
+
+                // only include interfaces with IPv4 addresses or docker bridge
+                // members
+                .filter(this::hasIpv4AddressOrDockerBridgeMember) //
+
                 .collect(Collectors.toSet());
     }
 
@@ -357,7 +366,7 @@ public class NCPResourceMonitor {
      * Check that the interface has an IPv4 address or is a member of a docker
      * bridge.
      */
-    private boolean hasIpv4Address(final NetworkInterface nic) {
+    private boolean hasIpv4AddressOrDockerBridgeMember(final NetworkInterface nic) {
         for (final InterfaceAddress ia : nic.getInterfaceAddresses()) {
             if (ia.getAddress() instanceof Inet4Address) {
                 log.trace("{} has an IPv4 address", nic);
@@ -372,7 +381,7 @@ public class NCPResourceMonitor {
         return dockerBridge;
     }
 
-    private final Map<NetworkInterface, IftopProcessor> networkMonitors = new HashMap<>();
+    private final Map<NetworkInterface, BaseIftopProcessor> networkMonitors = new HashMap<>();
 
     /**
      * 
@@ -400,7 +409,12 @@ public class NCPResourceMonitor {
 
             interfacesToMonitor.forEach(nic -> {
                 final InetAddress addr = getAddress(nic, memberToBridge);
-                final IftopProcessor processor = new IftopProcessor(nic);
+                final BaseIftopProcessor processor;
+                if (AgentConfiguration.getInstance().getIftopUseCustom()) {
+                    processor = new IftopProcessor(nic);
+                } else {
+                    processor = new OriginalIftopProcessor(nic);
+                }
                 processor.start();
                 if (networkMonitors.containsKey(nic)) {
                     throw new RuntimeException(
@@ -426,8 +440,8 @@ public class NCPResourceMonitor {
      */
     private IftopTrafficData fixLocalRemote(final InetAddress nicAddress, final IftopTrafficData trafficData1)
             throws UnknownHostException {
-        final InetAddress address1 = Address.getByName(trafficData1.getLocalIP());
-        final InetAddress address2 = Address.getByName(trafficData1.getRemoteIP());
+        final InetAddress address1 = DnsUtils.getByName(trafficData1.getLocalIP());
+        final InetAddress address2 = DnsUtils.getByName(trafficData1.getRemoteIP());
 
         final boolean flip;
         if (address1.isLoopbackAddress()) {
@@ -565,6 +579,14 @@ public class NCPResourceMonitor {
                 } else {
                     serverHost = destHost;
                 }
+            } else if (SimDriver.BACKGROUND_TRAFFIC_PORT == sourceHostPort
+                    || SimDriver.BACKGROUND_TRAFFIC_PORT == destHostPort) {
+                service = MAPServices.SIMULATION_DRIVER;
+                if (SimDriver.BACKGROUND_TRAFFIC_PORT == sourceHostPort) {
+                    serverHost = sourceHost;
+                } else {
+                    serverHost = destHost;
+                }
             } else if (PIM_ADDRESSES.contains(trafficData.getLocalIP())
                     || PIM_ADDRESSES.contains(trafficData.getRemoteIP())) {
                 service = MAPServices.PIM;
@@ -633,7 +655,7 @@ public class NCPResourceMonitor {
      */
     /* package */ void gatherNetworkInformation(final Controller controller,
             final InetAddress nicAddress,
-            final IftopProcessor monitor,
+            final BaseIftopProcessor monitor,
             final Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>> nicLoad) {
         final List<IftopTrafficData> trafficFrame = monitor.getLastIftopFrames();
         if (null != trafficFrame) {
@@ -739,11 +761,6 @@ public class NCPResourceMonitor {
             if (nicFolder.isDirectory()) {
                 final String nic = nicFolder.getName();
 
-                // ensure that NIC is in the NIC list
-                if (!nicList.contains(nic)) {
-                    nicList.add(nic);
-                }
-
                 final File speedFile = new File(nicFolder + FILE_NETWORK_CAPACITY_2);
                 if (speedFile.exists()) {
                     try {
@@ -782,9 +799,6 @@ public class NCPResourceMonitor {
                 int metricColumn = ProcFileParserUtils.getStringIndex(columnHeaders, "Metric", true);
                 int maskColumn = ProcFileParserUtils.getStringIndex(columnHeaders, "Mask", true);
 
-                // clear the table
-                networkRouteInformation.clear();
-
                 // create new RoutingTable
                 RoutingTable table = new RoutingTable();
 
@@ -801,20 +815,15 @@ public class NCPResourceMonitor {
                         String metric = lineParts[metricColumn];
                         String mask = lineParts[maskColumn];
 
-                        // add entry to the route information table
-                        String[] entry = { nic, destination, gateway, mask };
-                        networkRouteInformation.add(entry);
-
                         table.addRow(nic, hexIPtoStringIP(destination), hexIPtoStringIP(gateway),
                                 Integer.parseInt(metric), hexIPtoStringIP(mask));
 
-                        // ensure that NIC is in the NIC list
-                        if (!nicList.contains(nic))
-                            nicList.add(nic);
                     }
                 }
 
-                routingTable = table;
+                synchronized (routingTableLock) {
+                    routingTable = table;
+                }
 
                 log.debug("Updated routing table:\n{}", routingTable);
             } else {
@@ -992,7 +1001,9 @@ public class NCPResourceMonitor {
      * @return the RoutingTable for this NCP
      */
     public RoutingTable getRoutingTable() {
-        return routingTable;
+        synchronized (routingTableLock) {
+            return routingTable;
+        }
     }
 
     private static double kBToGB(long kB) {
@@ -1047,20 +1058,19 @@ public class NCPResourceMonitor {
         return bridgeInfo.getRight().get(nic);
     }
 
+    private static final String MAP_CONTROL_NETWORK = String.format("%d.%d.0.0/16", HiFiAgent.MAP_CONTROL_FIRST_OCTET,
+            HiFiAgent.MAP_CONTROL_SECOND_OCTET);
+    private static final SubnetInfo MAP_CONTROL_SUBNET = new SubnetUtils(MAP_CONTROL_NETWORK).getInfo();
+
     /**
      * 
-     * @param excludedSubnets
-     *            the subnets to exclude
      * @param addr
      *            the address on the interface to check
      * @return true if this address should be ignored (loopback or excluded
      *         subnet)
      */
-    public static boolean isInterfaceInExcludedSubnets(
-            final ImmutableCollection<SubnetUtils.SubnetInfo> excludedSubnets,
-            final InetAddress addr) {
+    private boolean isInterfaceInExcludedSubnets(final InetAddress addr) {
         if (addr.isLoopbackAddress()) {
-            // ignore loopback interface
             return true;
         } else if (addr instanceof Inet6Address) {
             // don't make a decision based on an IPv6 address as we don't know
@@ -1068,8 +1078,23 @@ public class NCPResourceMonitor {
             return false;
         } else {
             final String ip = addr.getHostAddress();
-            return excludedSubnets.stream().anyMatch(subnet -> subnet.isInRange(ip));
+
+            if (!AgentConfiguration.getInstance().getMonitorTestbedControlNetwork()) {
+                final boolean excluded = testbedControlSubnets.stream().anyMatch(subnet -> subnet.isInRange(ip));
+                if (excluded) {
+                    return true;
+                }
+            }
+
+            if (!AgentConfiguration.getInstance().getMonitorMapControlNetwork()) {
+                if (MAP_CONTROL_SUBNET.isInRange(ip)) {
+                    return true;
+                }
+            }
         }
+
+        // not excluded
+        return false;
     }
 
 }

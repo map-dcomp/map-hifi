@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -39,7 +39,12 @@ import java.util.Set;
 
 import javax.annotation.Nonnull;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 /* package*/ class DockerImageManager {
+
+    private static final Logger LOGGER = LogManager.getLogger(DockerImageManager.class);
 
     private final Object imagesLock = new Object();
     private final Set<String> localImages = new HashSet<>();
@@ -53,6 +58,10 @@ import javax.annotation.Nonnull;
      */
     /* package */ DockerImageManager(@Nonnull final String fetcherClassname) {
         fetcher = createFetcher(fetcherClassname);
+
+        final Set<String> images = SimpleDockerResourceManager.getCurrentImages();
+        localImages.addAll(images);
+        LOGGER.info("Initial list of images: {}", localImages);
     }
 
     private static ImageFetcher createFetcher(String fetcherClassname) {
@@ -165,4 +174,5 @@ import javax.annotation.Nonnull;
         }
 
     }
+
 }

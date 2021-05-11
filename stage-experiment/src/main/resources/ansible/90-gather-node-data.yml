@@ -14,10 +14,18 @@
         dest: /var/lib/map/collect-outputs.sh
         owner: root
         mode: 0744
+        
     - name: Collect data
       shell: /var/lib/map/collect-outputs.sh
+      register: result
+      until: result is not failed
+      retries: 10
+    
     - name: fetch collected data
       fetch:
         src: /var/lib/map/scenario-outputs/results.tar.xz
         dest: "scenario-outputs/{{inventory_hostname_short}}.tar.xz"
         flat: yes
+      register: result
+      until: result is not failed
+      retries: 10

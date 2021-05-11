@@ -10,8 +10,54 @@ try() { "$@" || fatal "'$@' failed"; }
 
 mydir=$(cd "$(dirname "$0")" && pwd -L) || fatal "Unable to determine script directory"
 
+cleanup() {
+    debug "In cleanup"
+    if [ -n "${watchdog_pid}" ]; then
+        # kill the process
+        kill ${watchdog_pid}
+        if [ -n "${output_dir}" ]; then
+            cp -f "${mydir}/watchdog.log" "${output_dir}"
+        fi
+    fi
+}
+trap 'cleanup' INT TERM EXIT
+
+execute_playbook_retry() {
+    playbook=$1
+
+    log_with_date "Executing ${playbook}"
+    
+    limit=''
+    playbook_done=0
+    playbook_attempt=0
+    while [ ${playbook_done} -eq 0 -a ${playbook_attempt} -lt 10 ]; do
+        ansible-playbook \
+            --extra-vars "@${mydir}/vars.yml" \
+            --extra-vars "testbed=${testbed} prefetch_images=${prefetch_images} collect_flow_data=${collect_flow_data}" \
+            --inventory hosts.${testbed} \
+            ${limit} ${playbook}
+        if [ $? -eq 0 ]; then
+            playbook_done=1
+        else
+            warn "Attempt ${playbook_attempt} of ${playbook} failed"
+
+            log_with_date "Sleeping 60 seconds before trying again"
+            sleep 60
+        fi
+        playbook_attempt=$(expr ${playbook_attempt} + 1)
+
+        retry_file=$(basename ${playbook} .yml).retry
+        if [ -e ${retry_file} ]; then
+            limit="--limit @${retry_file}"
+        fi
+    done
+    if [ ${playbook_done} -eq 0 ]; then
+        fatal "All attempts executing ${playbook} have failed"
+    fi
+}
+
+config_output_dir=$(date +%m%d%y_%H%M)
 multicast=0
-testbed='emulab'
 auto_swap=0
 collect_flow_data=0
 prefetch_images=1
@@ -22,7 +68,7 @@ while [ $# -gt 0 ]; do
             auto_swap=1
             ;;
         "--dcomptb")
-            testbed='dcomp'
+            # ignored
             ;;
         "--collect-flow-data")
             collect_flow_data=1
@@ -36,13 +82,20 @@ while [ $# -gt 0 ]; do
         "--multicast")
             multicast=1
             ;;
+        "--output")
+            if [ -z "$2" ]; then
+                fatal "--output is missing argument"
+            fi
+            config_output_dir=$2
+            shift
+            ;;
         "--help")
             echo "Usage: $0"
-            echo "    --testbed <testbed> - specify the testbed (dcomp or emulab)"
             echo "    [--auto-swap] - if the experiment should swap out when the scenario finishes"
             echo "    [--collect-flow-data] - if flow data should be collected"
             echo "    [--prefetch-images / --no-prefetch-images] - if the service and client images should be prefetched or not (defaults to yes)"
             echo "    [--multicast] - enable multicast routing"
+            echo "    [--output <name>] - output directory relative to the scenario output directory"
             echo "    [--help | -h] - this help"
             exit 0
             ;;
@@ -52,6 +105,15 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+if [ -e /proj ]; then
+    testbed="emulab"
+elif [ -e /project ]; then
+    # DCOMP testbed
+    testbed="dcomp"
+else
+    fatal "Unable to determine the testbed"
+fi
 
 if [ "${testbed}" = "emulab" ]; then
     log_with_date "Using emulab testbed"
@@ -68,44 +130,32 @@ fi
 if [ ! -e "${mydir}"/hosts.${testbed} ]; then
     fatal "File ${mydir}/hosts.${testbed} doesn't exist, something is wrong with the testbed parameters"
 fi
-     
-execute_playbook_retry() {
-    playbook=$1
 
-    log_with_date "Executing ${playbook}"
-    
-    limit=''
-    playbook_done=0
-    playbook_attempt=0
-    while [ ${playbook_done} -eq 0 -a ${playbook_attempt} -lt 10 ]; do
-        ansible-playbook --extra-vars "@${mydir}/vars.yml" --inventory hosts.${testbed} ${limit} ${playbook}
-        if [ $? -eq 0 ]; then
-            playbook_done=1
-        else
-            warn "Attempt ${playbook_attempt} of ${playbook} failed"
-        fi
-        playbook_attempt=$(expr ${playbook_attempt} + 1)
+if [ ! -e 02-failsafe-dns_${testbed}.yml ]; then
+    fatal "Missing 02-failsafe-dns_${testbed}.yml"
+fi
 
-        retry_file=$(basename ${playbook} .yml).retry
-        if [ -e ${retry_file} ]; then
-            limit="--limit @${retry_file}"
-        fi
-    done
-    if [ ${playbook_done} -eq 0 ]; then
-        fatal "All attempts executing ${playbook} have failed"
-    fi
-}
+if [ ! -e 11-copy-registry-images_${testbed}.yml ]; then
+    fatal "Missing 11-copy-registry-images_${testbed}.yml"
+fi
+
+if [ ! -e 14-copy-control-names_${testbed}.yml ]; then
+    fatal "Missing 14-copy-control-names_${testbed}.yml"
+fi
+
+if [ ! -e 15-copy-flink-traces_${testbed}.yml ]; then
+    fatal "Missing 14-copy-flink-traces_${testbed}.yml"
+fi
 
 # ensure that we don't get stuck at prompts
 DEBIAN_FRONTEND=noninteractive
 export DEBIAN_FRONTEND
-
 # don't need this on dcomp testbed because the script is running from the
 # XDC and it doesn't get it's DNS modified
 if [ "${testbed}" = "emulab" ]; then
     log_with_date "Make sure a working DNS is specified"
     echo "boss.emulab.net" | sudo tee /etc/emulab/bossnode || fatal "Unable to set Emulab boss node"
-    printf "[Resolve]\nDNS=8.8.8.8\n" | sudo tee /etc/systemd/resolved.conf || fatal "Unable to set fallback dns for systemd-resolve"
+    printf "[Resolve]\nDNS=155.98.32.70\n" | sudo tee /etc/systemd/resolved.conf || fatal "Unable to set fallback dns for systemd-resolve"
     try sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
     try sudo systemctl restart systemd-resolved
 fi
@@ -123,10 +173,26 @@ else
 fi
 
 # turn off cache directory to avoid using quota in home directory
+try pip --no-cache-dir install --upgrade pip
 try pip --no-cache-dir install --upgrade setuptools
 try pip --no-cache-dir install wheel ansible
 
 cd "${mydir}"
+
+# directory for ansible to keep facts in
+rm -fr "ansible-fact-cache"
+mkdir -p "ansible-fact-cache"
+
+# start watchdog after virtualenv setup and ansible installed
+if [ "${testbed}" = "dcomp" ]; then
+    # start the watchdog - can't call with try, this will cause the wrong pid to be captured
+    "${mydir}"/watchdog.py >> "${mydir}/watchdog.log" 2>&1 &
+    watchdog_pid=$!
+fi
+
+# create certificate for docker
+try "${mydir}"/registry/gen_cert_map.sh
+
 
 if [ "${testbed}" = "dcomp" ]; then
     # TODO: this can go away when we have a custom image to load
@@ -134,56 +200,13 @@ if [ "${testbed}" = "dcomp" ]; then
     execute_playbook_retry 00-setup_dcomp.yml
 fi
 
-
 log_with_date "setting up ansible packages"
-execute_playbook_retry 01-ansible-packages.yml
+execute_playbook_retry master-playbook-01.yml
 
-log_with_date "Setup fallback DNS"
-execute_playbook_retry 02-failsafe-dns.yml
-
-log_with_date "Stopping Quagga routing"
-execute_playbook_retry stop-quagga.yml
-
-log_with_date "make sure the services are installed so that the stop commands don't fail"
-execute_playbook_retry 04-install-services.yml
-
-log_with_date "make sure all MAP services are stopped"
-execute_playbook_retry stop_clients.yml
-execute_playbook_retry stop_map_agent.yml
-
-log_with_date "wait for the services to finish stopping"
+log_with_date "Wait for the services to finish stopping"
 sleep 30
 
-# in case it was running previously
-execute_playbook_retry flow-stop.yml
-
-log_with_date "Cleanup from previous experiment"
-execute_playbook_retry 05-cleanup.yml
-if [ ${prefetch_images} -eq 0 ]; then
-    execute_playbook_retry clear-docker.yml
-fi
-
-log_with_date "setting up scenario"
-execute_playbook_retry 10-setup.yml
-
-if [ ${collect_flow_data} -eq 1 ]; then
-    execute_playbook_retry flow-install.yml
-fi
-
-# create certificate for docker
-try "${mydir}"/registry/gen_cert_map.sh
-
-execute_playbook_retry 11-registry.yml
-if [ ! -e 11-copy-registry-images_${testbed}.yml ]; then
-    fatal "Missing 11-copy-registry-images_${testbed}.yml"
-else
-    execute_playbook_retry 11-copy-registry-images_${testbed}.yml
-fi
-execute_playbook_retry 12-setup-ncps.yml
-execute_playbook_retry 13-setup-clients.yml
-execute_playbook_retry 14-setup-sim-driver.yml
-
-execute_playbook_retry 15-docker-networking.yml
+execute_playbook_retry master-playbook-01.1.yml
 
 # only setup quagga if the routing is dynamic
 routing_protocol=$(grep rtproto "${mydir}"/topology.ns | awk '{print $3}' | tr '[:upper:]' '[:lower:]')
@@ -194,37 +217,20 @@ if [ "manual" = "${routing_protocol}" ]; then
         execute_playbook_retry pimd.yml
     fi
 
-    log_with_date "Waiting a bit for quagga to get all routes sorted out"
-    sleep 60
-    
     log_with_date "Checking for all IP addresses being accessible"
     execute_playbook_retry wait_for_dynamic_routing.yml
     log_with_date "Done waiting"
 fi
 
-execute_playbook_retry 20-dns.yml
-execute_playbook_retry 40-start_registry.yml
+execute_playbook_retry master-playbook-02.yml
 
 log_with_date "Waiting a bit for the docker registry to start up"
 sleep 120
 
-execute_playbook_retry 45-client-pre-start.yml
+execute_playbook_retry master-playbook-02.1.yml
 
-if [ ${prefetch_images} -eq 1 ]; then
-    execute_playbook_retry fetch_images.yml
-fi
-
-log_with_date "Installing map system stats collection"
-execute_playbook_retry sysinfo/install.yml
-
-log_with_date "Starting map system stats collection"
-execute_playbook_retry sysinfo/start.yml
-
-log_with_date "Starting agents"
-execute_playbook_retry 50-start_map_agent.yml
-
-# limit the wait to 30 minutes
-limit_seconds=$(expr 30 '*' 60)
+# limit the wait to 60 minutes
+limit_seconds=$(expr 60 '*' 60)
 start=$(date +%s)
 timeout=$(expr ${start} + ${limit_seconds})
 for ncp in ${ncps}; do
@@ -240,68 +246,57 @@ for ncp in ${ncps}; do
 
 done
 
-if [ ${collect_flow_data} -eq 1 ]; then
-    execute_playbook_retry flow-start.yml
-fi
-
 log_with_date "Starting clients"
-execute_playbook_retry 52-start_clients.yml
-
-log_with_date "Starting background traffic drivers"
-execute_playbook_retry start_background_traffic.yml
-
-log_with_date "Starting sim driver"
-execute_playbook_retry 55-start_sim-driver.yml
+execute_playbook_retry master-playbook-03.yml
 
 log_with_date "Waiting for clients to finish"
 try "${mydir}"/wait_for_clients.py ${wait_for_clients_args}
 
-log_with_date "Stopping simulation driver"
-execute_playbook_retry stop_sim-driver.yml
-
-log_with_date "Stopping agents"
-execute_playbook_retry stop_map_agent.yml
-
-if [ ${collect_flow_data} -eq 1 ]; then
-    execute_playbook_retry flow-stop.yml
-fi
-
-log_with_date "Stopping background traffic drivers"
-execute_playbook_retry stop_background_traffic.yml
-
-log_with_date "Stopping map system stats collection"
-execute_playbook_retry sysinfo/stop.yml
-
-log_with_date "collecting results"
-execute_playbook_retry 90-gather-node-data.yml
+log_with_date "Stopping simulation driver and collecting data"
+execute_playbook_retry master-playbook-04.yml
 
 log_with_date "Setting up output folder"
 # copy the file to the project shared directory
 if [ -d /proj/a3/map ]; then
-    output_dir=/proj/a3/map/scenario-outputs/${USER}
+    output_dir=/proj/a3/map/scenario-outputs/${USER}/${config_output_dir}
     #temp_dir=${output_dir}/EXPERIMENT-temp-combine-results
     temp_dir=${mydir}/EXPERIMENT-temp-combine-results
-    output_tar=${output_dir}/EXPERIMENT-all-results.tar
 elif [ -d /project/map ]; then
-    output_dir=/project/map/scenario-outputs/${USER}
+    output_dir=/project/map/scenario-outputs/${USER}/${config_output_dir}
     # dcomp, lots of disk space and problematic ceph filesystem
     temp_dir=${mydir}/EXPERIMENT-temp-combine-results
-    output_tar=${mydir}/EXPERIMENT-all-results.tar
 else
     warn "Cannot find the output directory to use, storing in home folder"
-    output_dir=${HOME}
+    output_dir=${HOME}/${config_output_dir}
     temp_dir=${output_dir}/EXPERIMENT-temp-combine-results
-    output_tar=${output_dir}/EXPERIMENT-all-results.tar
 fi
 
 try mkdir -p "${output_dir}"
-chmod g+w "${output_dir}" || log "Can't add group write to ${output_dir}, hoping that it's already set"
+chmod g+w "${output_dir}" || warn "Can't add group write to ${output_dir}, hoping that it's already set"
 
 # combine all tar files into one and create a top level directory
 try rm -fr "${temp_dir}"
 try mkdir "${temp_dir}"
 try cd "${temp_dir}"
 try mkdir -p EXPERIMENT.SCENARIO_NAME
+
+if [ "${testbed}" = "dcomp" ]; then
+    if [ -z "${watchdog_pid}" ]; then
+        warn "Watchdog pid not set, not killing watchdog"
+    else
+        log_with_date "Stopping the watchdog"
+        
+        # kill the process
+        kill ${watchdog_pid}
+        if [ -e "${mydir}/watchdog.log" ]; then
+            try cp -f "${mydir}/watchdog.log" EXPERIMENT.SCENARIO_NAME/
+        else
+            warn "No ${mydir}/watchdog.log file found"
+        fi
+        watchdog_pid=""
+    fi
+fi
+
 
 # copy the inputs required to do analysis
 try mkdir -p EXPERIMENT.SCENARIO_NAME/inputs
@@ -316,6 +311,7 @@ try cp -r "${mydir}"/region_subnet.txt "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/in
 try cp -f "${mydir}"/client/client-service-configurations.json "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/
 try cp -f "${mydir}"/service-configurations.json "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/scenario/
 try cp -f "${mydir}"/dns/host-ip.csv "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/scenario/
+try cp -f "${mydir}"/input_topology.ns "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/
 
 log_with_date "Getting the node mapping"
 # get node mapping
@@ -323,21 +319,23 @@ if [ "${testbed}" = "emulab" ]; then
     python2 ${mydir}/emulab-scripts/script_wrapper.py expinfo -a -e GROUP,EXPERIMENT > "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/node-mapping.txt
 elif [ "${testbed}" = "dcomp" ]; then
     mergetb -p DCOMP_PROJECT show realization EXPERIMENT SCENARIO_NAME > "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/node-mapping.txt
+    mergetb -p DCOMP_PROJECT show materialization EXPERIMENT SCENARIO_NAME --json > "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/node-mapping-details.json
 fi
 
+# don't fail if getting the network information fails, just do the best we can
+ansible --inventory "${mydir}"/hosts.${testbed} -a "ip addr show" all > "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/inputs/network-information.txt 2>&1
 
 log_with_date "Moving the node output files"
 try mv "${mydir}"/scenario-outputs/*.tar.xz "${temp_dir}"/EXPERIMENT.SCENARIO_NAME/
 
 log_with_date "Creating final tar file"
 try cd "${temp_dir}"
-try tar -cf "${output_tar}" EXPERIMENT.SCENARIO_NAME                                                                                                 
 
-log_with_date "Compressing final tar file"
-final_output=${output_dir}/EXPERIMENT.SCENARIO_NAME.tar.xz
-try xz -T0 -c "${output_tar}" > ${final_output}
+final_output=${output_dir}/EXPERIMENT.SCENARIO_NAME.tar
+try tar -cf "${final_output}" EXPERIMENT.SCENARIO_NAME                                                                                                 
 
-try rm -f "${output_tar}"
+# make sure we are in a valid directory
+try cd "${mydir}"
 
 try rm -rf "${temp_dir}"
 
@@ -349,14 +347,7 @@ if [ ${auto_swap} -eq 1 ]; then
         python2 ${mydir}/emulab-scripts/script_wrapper.py swapexp -e GROUP,EXPERIMENT out
         # nothing after the python line will be executed because this script is running inside the experiment being swapped out
     elif [ "${testbed}" = "dcomp" ]; then
-        try detach
-        try mergetb -p DCOMP_PROJECT dematerialize EXPERIMENT SCENARIO_NAME
-
-        log "waiting for experiment to dematerialize"
-        #until ! mergetb -p DCOMP_PROJECT status  EXPERIMENT SCENARIO_NAME | grep "false"; do sleep 1; log "--------"; log ""; done
-        try mergetb -p DCOMP_PROJECT wait EXPERIMENT SCENARIO_NAME
-        
-        try mergetb -p DCOMP_PROJECT free EXPERIMENT SCENARIO_NAME
+        try "${mydir}"/teardown_dcomp.sh
     else
         warn "Automatic swap out with testbed '${testbed}' isn't currently supported"
     fi

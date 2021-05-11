@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -52,7 +52,6 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -150,11 +149,6 @@ public class WeightedRecordMessageServer {
             }
 
         }
-    }
-
-    private static final class CollectionOfWeightedRecordListTypeInformation
-            extends TypeReference<Collection<WeightedRecordList>> {
-        public static final CollectionOfWeightedRecordListTypeInformation INSTANCE = new CollectionOfWeightedRecordListTypeInformation();
     }
 
     /**
@@ -295,10 +289,10 @@ public class WeightedRecordMessageServer {
                         if (FLUSH_COMMAND.equalsIgnoreCase(command)) {
                             reply = flushLogs();
                         } else if (UPDATE_COMMAND.equalsIgnoreCase(command)) {
-                            final Collection<WeightedRecordList> list = parser
-                                    .readValueAs(CollectionOfWeightedRecordListTypeInformation.INSTANCE);
+                            final RecordUpdateMessage message = parser.readValueAs(RecordUpdateMessage.class);
 
-                            server.resolver.setWeightedRecords(list);
+                            LOGGER.trace("Received update message: {}", message);
+                            server.resolver.setWeightedRecords(message);
                             reply = new Reply(true, null);
                         } else {
                             reply = new Reply(false, "Unknown command: '" + command + "'");

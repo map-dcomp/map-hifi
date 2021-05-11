@@ -36,6 +36,7 @@ configurations {
 }
 
 dependencies {
+    api project(':hifi-utils')
     api project(':MAP-Agent')
 
     api group: 'se.unlogic', name: 'eagledns', version: '1.1.2'

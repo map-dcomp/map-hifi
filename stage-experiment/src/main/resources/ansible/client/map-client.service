@@ -10,6 +10,7 @@ ExecStart=/usr/bin/java -Xmx1G -jar /var/lib/map/client/map-client.jar
 StandardOutput=file:/var/lib/map/client/service.stdout.log
 StandardError=file:/var/lib/map/client/service.stderr.log
 OOMScoreAdjust=-1000
+TasksMax=infinity
 
 [Install]
 WantedBy=default.target

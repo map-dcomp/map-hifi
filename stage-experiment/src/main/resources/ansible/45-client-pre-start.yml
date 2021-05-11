@@ -3,8 +3,11 @@
   become: yes
   tasks:
     - name: Execute pre-start commands for clients
-      become: yes
+      become_user: map
       shell: java -jar map-client-pre-start.jar
       args: 
         chdir: /var/lib/map/client
+      register: result
+      until: result is not failed
+      retries: 10
       

@@ -1,5 +1,5 @@
 #BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-# Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+# Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 # To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 # the exception of the dcop implementation identified below (see notes).
 # 
@@ -45,6 +45,7 @@ with warnings.catch_warnings():
     import psutil
     import time
     import csv
+    import subprocess
 
 script_dir=os.path.abspath(os.path.dirname(__file__))
 
@@ -89,7 +90,7 @@ def is_docker(pid):
 
 def gather_stats(output_dir):
     now = int(time.time())
-    fname = output_dir / '{}.csv'.format(now)
+    fname = output_dir / f'{now}.csv'
     with open(fname, 'w') as f:
         writer = csv.writer(f)
         writer.writerow(['pid', 'name', 'user', 'cpu_user', 'cpu_sys', 'memory_rss', 'memory_vms', 'docker', 'cmdline'])
@@ -108,14 +109,47 @@ def gather_stats(output_dir):
                 get_logger().debug("exception gathering processing information, skipping process: %s", sys.exc_info()[0])
 
         system_cpu = psutil.cpu_times()
-        total_uptime = system_cpu.user + system_cpu.system + system_cpu.idle
-        writer.writerow([-1, "system_total", "system_total", total_uptime, -1, psutil.virtual_memory().total, psutil.swap_memory().total, False, ""])        
+        total_uptime = sum(system_cpu)
+        writer.writerow([-1, "system_total", "system_total", total_uptime, -1, psutil.virtual_memory().total, psutil.swap_memory().total, False, ""])
 
+    # capture raw network stats to compare with MAP network collection
+    fname_net = output_dir / f'{now}_net.csv'
+    with open(fname_net, 'w') as f_net:
+        writer_net = csv.writer(f_net)
+        
+        # explanation of stats
+        # https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-class-net-statistics
+        stats = ['rx_bytes', 'rx_errors', 'rx_dropped', 'rx_fifo_errors', 'rx_missed_errors', 'tx_bytes', 'tx_errors', 'tx_dropped', 'tx_fifo_errors']
+        
+        header = ['interface']
+        header.extend(stats)
+        writer_net.writerow(header)
 
+        sys_net = Path('/sys/class/net')
+        for interface_dir in sys_net.iterdir():
+            row = list()
+            
+            interface = interface_dir.name
+            row.append(interface)
+            
+            for stat in stats:
+                stats_file = interface_dir / f'statistics/{stat}'
+                if stats_file.exists():
+                    row.append(stats_file.read_text().strip())
+                else:
+                    row.append("")
+                    
+            writer_net.writerow(row)
+
+    # capture routing table
+    fname_route = output_dir / f'{now}_routes.log'
+    with open(fname_route, 'w') as  f:
+        subprocess.run(["ip", "route", "show"], stdout=f)
+
+            
 def main_method(args):
     output_dir = Path(args.output)
-    if not output_dir.exists():
-        output_dir.mkdirs(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
         
     while True:
         gather_stats(output_dir)

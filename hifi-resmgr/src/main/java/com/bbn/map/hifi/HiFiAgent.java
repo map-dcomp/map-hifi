@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -37,6 +37,7 @@ import java.io.InputStream;
 import java.io.Reader;
 import java.net.InetAddress;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -45,6 +46,8 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import javax.annotation.Nonnull;
@@ -63,7 +66,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.bbn.map.AgentConfiguration;
+import com.bbn.map.AgentConfiguration.DnsResolutionType;
 import com.bbn.map.Controller;
+import com.bbn.map.MapOracle;
 import com.bbn.map.NetworkServices;
 import com.bbn.map.ServiceConfiguration;
 import com.bbn.map.ap.MapNetworkFactory;
@@ -72,15 +77,20 @@ import com.bbn.map.common.value.ApplicationCoordinates;
 import com.bbn.map.dns.DNSUpdateService;
 import com.bbn.map.dns.DnsRecord;
 import com.bbn.map.dns.PlanTranslator;
+import com.bbn.map.hifi.dns.DnsServer;
 import com.bbn.map.hifi.ta2.TA2Impl;
+import com.bbn.map.hifi.util.AbsoluteClock;
 import com.bbn.map.hifi.util.ConcurrencyUtils;
+import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi.util.IdentifierUtils;
+import com.bbn.map.hifi.util.SimAppUtils;
 import com.bbn.map.hifi_resmgr.SimpleDockerResourceManager;
 import com.bbn.map.simulator.HardwareConfiguration;
 import com.bbn.map.simulator.SimulationRunner;
 import com.bbn.map.ta2.TA2Interface;
 import com.bbn.map.utils.LogExceptionHandler;
 import com.bbn.protelis.networkresourcemanagement.ContainerParameters;
+import com.bbn.protelis.networkresourcemanagement.DnsNameIdentifier;
 import com.bbn.protelis.networkresourcemanagement.LoadBalancerPlan;
 import com.bbn.protelis.networkresourcemanagement.NodeIdentifier;
 import com.bbn.protelis.networkresourcemanagement.NodeLookupService;
@@ -102,7 +112,7 @@ import com.google.common.collect.ImmutableSet;
  * @author jschewe
  *
  */
-public class HiFiAgent implements NetworkServices {
+public class HiFiAgent implements NetworkServices, MapOracle {
 
     // put this first to ensure that the correct logging configuration is used
     static {
@@ -133,9 +143,11 @@ public class HiFiAgent implements NetworkServices {
 
         public String hardwareConfigName;
 
-        public Path excludedSubnetsFile;
+        public Path testbedControlSubnetsFile;
 
         public String imageFetcherClassname = IMAGE_FETCHER_CLASSNAME_DEFAULT;
+        public int dcopPort;
+        public Path dcopLeadersFile;
 
     }
     // CHECKSTYLE:ON
@@ -168,11 +180,6 @@ public class HiFiAgent implements NetworkServices {
      * File to read global properties from.
      */
     public static final String GLOBAL_PROPERTIES_FILENAME = "global.properties";
-
-    /**
-     * File to read the agent configuration from.
-     */
-    public static final String AGENT_CONFIGURATION_FILENAME = "agent-configuration.json";
 
     /**
      * Name of property to read from {@link #GLOBAL_PROPERTIES_FILENAME} to get
@@ -218,6 +225,16 @@ public class HiFiAgent implements NetworkServices {
     public static final String SERVICE_DEPENDENCIES_FILENAME = "service-dependencies.json";
 
     /**
+     * The filename that region subnet information is read from.
+     */
+    public static final String REGION_SUBNET_FILENAME = "region_subnet.txt";
+
+    /**
+     * The filename that DCOP leader information is read from.
+     */
+    public static final String DCOP_LEADERS_FILENAME = "dcop_leaders.txt";
+
+    /**
      * Name of property to read from {@link #LOCAL_PROPERTIES_FILENAME} to get
      * the hardware configuration information.
      */
@@ -233,6 +250,12 @@ public class HiFiAgent implements NetworkServices {
      * the classname to use for fetching docker images.
      */
     public static final String IMAGE_FETCHER_CLASSNAME_KEY = "IMAGE_FETCHER_CLASSNAME";
+
+    /**
+     * Name of property to read from {@link #GLOBAL_PROPERTIES_FILENAME} to get
+     * the port number that DCOP will use to communicate.
+     */
+    public static final String DCOP_PORT_PROPERTY_KEY = "DCOP_PORT";
 
     /**
      * @param configurationDirectory
@@ -251,7 +274,7 @@ public class HiFiAgent implements NetworkServices {
             return null;
         }
 
-        final Path agentConfigFile = configurationDirectory.resolve(AGENT_CONFIGURATION_FILENAME);
+        final Path agentConfigFile = configurationDirectory.resolve(DnsServer.AGENT_CONFIGURATION_FILENAME);
         if (Files.exists(agentConfigFile)) {
             AgentConfiguration.readFromFile(agentConfigFile);
         }
@@ -307,9 +330,9 @@ public class HiFiAgent implements NetworkServices {
             return null;
         }
 
-        parameters.excludedSubnetsFile = configurationDirectory.resolve("excluded-subnets.txt");
-        if (!Files.exists(parameters.excludedSubnetsFile)) {
-            LOGGER.error("{} does not exist", parameters.excludedSubnetsFile);
+        parameters.testbedControlSubnetsFile = configurationDirectory.resolve("testbed-control-subnets.txt");
+        if (!Files.exists(parameters.testbedControlSubnetsFile)) {
+            LOGGER.error("{} does not exist", parameters.testbedControlSubnetsFile);
             return null;
         }
 
@@ -334,7 +357,7 @@ public class HiFiAgent implements NetworkServices {
             return null;
         }
 
-        parameters.regionSubnetFile = configurationDirectory.resolve("region_subnet.txt");
+        parameters.regionSubnetFile = configurationDirectory.resolve(REGION_SUBNET_FILENAME);
         if (!Files.exists(parameters.regionSubnetFile)) {
             LOGGER.error("{} does not exist", parameters.regionSubnetFile);
             return null;
@@ -363,11 +386,26 @@ public class HiFiAgent implements NetworkServices {
             parameters.imageFetcherClassname = propValue;
         }
 
+        parameters.dcopPort = Integer.parseInt(globalProps.getProperty(DCOP_PORT_PROPERTY_KEY, "-1"));
+        if (parameters.apPort < 1) {
+            LOGGER.error("{} does not contain property {}", globalPropsFile, DCOP_PORT_PROPERTY_KEY);
+            return null;
+        }
+
+        parameters.dcopLeadersFile = configurationDirectory.resolve(DCOP_LEADERS_FILENAME);
+        if (!Files.exists(parameters.dcopLeadersFile)) {
+            LOGGER.error("{} does not exist", parameters.dcopLeadersFile);
+            return null;
+        }
+
         return parameters;
     }
 
+    private static final int CONTAINER_ADDRESS_LOOKUP_MAX_ATTEMPTS = 10;
+
     /**
-     * Parse the container names from the specified file.
+     * Parse the container names from the specified file and get their address
+     * information.
      * 
      * @param containerNamesFile
      *            where to read the container names from
@@ -375,28 +413,59 @@ public class HiFiAgent implements NetworkServices {
      * @throws IOException
      *             if there is an error reading the file
      */
-    private static ImmutableList<NodeIdentifier> parseContainerNames(@Nonnull final Path containerNamesFile)
+    private static ImmutableMap<NodeIdentifier, InetAddress> parseContainerNames(@Nonnull final Path containerNamesFile)
             throws IOException {
         if (!Files.exists(containerNamesFile)) {
             LOGGER.error("{} does not exist", containerNamesFile);
             return null;
         }
 
-        final ImmutableList.Builder<NodeIdentifier> names = ImmutableList.builder();
         try (Stream<String> stream = Files.lines(containerNamesFile)) {
-            stream.filter(line -> !(null == line || line.trim().isEmpty())).forEach(line -> {
-                final NodeIdentifier id = IdentifierUtils.getNodeIdentifier(line);
-                names.add(id);
-            });
+            final ImmutableMap<NodeIdentifier, InetAddress> containerInformation = stream
+                    .filter(line -> !(null == line || line.trim().isEmpty()))//
+                    .map(line -> {
+                        final NodeIdentifier id = IdentifierUtils.getNodeIdentifier(line);
+                        return id;
+                    }) //
+                    .collect(Collectors.collectingAndThen(//
+                            Collectors.toMap(Function.identity(), HiFiAgent::addressForIdentifier), //
+                            ImmutableMap::copyOf));
+
+            if (containerInformation.isEmpty()) {
+                LOGGER.warn("No container names found in {}", containerNamesFile);
+            }
+
+            return containerInformation;
         }
+    }
 
-        final ImmutableList<NodeIdentifier> namesList = names.build();
+    /**
+     * Find the address for a name. If
+     * {@link #CONTAINER_ADDRESS_LOOKUP_MAX_ATTEMPTS} lookup attempts fail, this
+     * throws a {@link RuntimeException}.
+     */
+    private static InetAddress addressForIdentifier(final NodeIdentifier id) {
+        final String name = id.getName();
+        for (int attempt = 0; attempt < CONTAINER_ADDRESS_LOOKUP_MAX_ATTEMPTS; ++attempt) {
+            try {
+                final InetAddress addr = DnsUtils.getByName(name);
+                return addr;
+            } catch (final UnknownHostException e) {
+                if (attempt + 1 < CONTAINER_ADDRESS_LOOKUP_MAX_ATTEMPTS) {
+                    final long retryDelay = SimAppUtils.getClientRetryDelay();
+                    LOGGER.warn("Attempt {} to get address for {} failed. Trying again in {} ms", attempt, name,
+                            retryDelay, e);
+                    try {
+                        Thread.sleep(retryDelay);
+                    } catch (final InterruptedException e1) {
+                        LOGGER.error("Problem waiting retry delay of {} ms.", retryDelay, e1);
+                    }
+                } // if this isn't the last attempt
+            } // unknown host exception
+        } // foreach attempt
 
-        if (namesList.isEmpty()) {
-            LOGGER.warn("No container names found in {}", containerNamesFile);
-        }
-
-        return namesList;
+        throw new RuntimeException(
+                "Failed to lookup " + id + " after " + CONTAINER_ADDRESS_LOOKUP_MAX_ATTEMPTS + " attempts");
     }
 
     /**
@@ -455,9 +524,12 @@ public class HiFiAgent implements NetworkServices {
     public static void main(final String[] args) throws InterruptedException {
         LogExceptionHandler.registerExceptionHandler();
 
+        DnsUtils.configureDnsCache();
+
         final Options options = new Options();
         options.addOption(null, CONFIGURATION_DIRECTORY_OPT, true,
-                "The directory to read the configuration from (default: " + DEFAULT_CONFIGURATION_DIRECTORY + ")");
+                "The directory to read the configuration from (default: " + DnsServer.DEFAULT_CONFIGURATION_DIRECTORY
+                        + ")");
         options.addOption("h", HELP_OPT, false, "Show the help");
         options.addOption("v", VERSION_OPT, false, "Display the version");
 
@@ -480,7 +552,7 @@ public class HiFiAgent implements NetworkServices {
                 final String configDirectoryStr = cmd.getOptionValue(CONFIGURATION_DIRECTORY_OPT);
                 configurationDirectory = Paths.get(configDirectoryStr);
             } else {
-                configurationDirectory = Paths.get(DEFAULT_CONFIGURATION_DIRECTORY);
+                configurationDirectory = Paths.get(DnsServer.DEFAULT_CONFIGURATION_DIRECTORY);
             }
 
             final Parameters parameters = parseConfigurationDirectory(configurationDirectory);
@@ -493,7 +565,8 @@ public class HiFiAgent implements NetworkServices {
 
             final Map<String, Object> extraData = parseExtraData(parameters.configurationFile);
 
-            final ImmutableList<NodeIdentifier> containerNames = parseContainerNames(parameters.containerNamesFile);
+            final ImmutableMap<NodeIdentifier, InetAddress> containerNames = parseContainerNames(
+                    parameters.containerNamesFile);
             if (null == containerNames) {
                 System.exit(1);
             }
@@ -505,8 +578,18 @@ public class HiFiAgent implements NetworkServices {
                 System.exit(1);
             }
 
-            final ImmutableMap<String, Double> ipToSpeed = readIpSpeedFile(configurationDirectory);
+            final ImmutableMap<RegionIdentifier, NodeIdentifier> dcopLeaders = parseDcopLeaders(
+                    parameters.dcopLeadersFile);
+            if (null == dcopLeaders) {
+                System.exit(1);
+            }
+
+            final Pair<ImmutableMap<String, Double>, ImmutableMap<String, Double>> ipSpeedResult = readIpSpeedFile(
+                    configurationDirectory);
+            final ImmutableMap<String, Double> ipToSpeed = ipSpeedResult.getLeft();
             LOGGER.debug("Found IP to speed: {}", ipToSpeed);
+            final ImmutableMap<String, Double> ipToDelay = ipSpeedResult.getRight();
+            LOGGER.debug("Found IP to delay: {}", ipToDelay);
 
             final NodeIdentifier id = IdentifierUtils.getNodeIdentifier(parameters.hostname);
 
@@ -518,14 +601,12 @@ public class HiFiAgent implements NetworkServices {
                     String.format("%s uses hardware config %s that is not know to the scenario", parameters.hostname,
                             parameters.hardwareConfigName));
 
-            final ImmutableCollection<SubnetUtils.SubnetInfo> excludedSubnets = loadExcludedSubnets(
-                    parameters.excludedSubnetsFile);
+            final ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets = loadExcludedSubnets(
+                    parameters.testbedControlSubnetsFile);
 
-            final HiFiAgent agent = new HiFiAgent(id, extraData, TTL, serviceConfigurations, parameters.apPort,
-                    parameters.neighborsFile, containerNames, parameters.dockerRegistryHostname,
-                    new FileRegionLookupService(subnetToRegion), parameters.dumpEnabled, parameters.dumpInterval,
-                    parameters.dumpDirectory, parameters.globalLeader, ipToSpeed, hardwareConfig, excludedSubnets,
-                    parameters.imageFetcherClassname);
+            final HiFiAgent agent = new HiFiAgent(id, extraData, TTL, serviceConfigurations, containerNames,
+                    new FileRegionLookupService(subnetToRegion), ipToSpeed, ipToDelay, hardwareConfig,
+                    testbedControlSubnets, dcopLeaders, parameters);
             outputVersionInformation();
             agent.start();
 
@@ -561,10 +642,6 @@ public class HiFiAgent implements NetworkServices {
      */
     public static final String CONFIGURATION_DIRECTORY_OPT = "configuration-directory";
     /**
-     * Default directory to find configuration files in.
-     */
-    public static final String DEFAULT_CONFIGURATION_DIRECTORY = "/etc/map";
-    /**
      * Option to ask for help.
      */
     public static final String HELP_OPT = "help";
@@ -585,6 +662,7 @@ public class HiFiAgent implements NetworkServices {
     private final MapNetworkFactory networkFactory;
     private final SimpleDockerResourceManagerFactory managerFactory;
     private final TA2Impl ta2;
+    private final NodeLookupService dcopLookup;
 
     /**
      * Construct an agent.
@@ -597,97 +675,122 @@ public class HiFiAgent implements NetworkServices {
      *            the ttl to use for DNS entries
      * @param serviceConfigurations
      *            the service configuration information
-     * @param apPort
-     *            the port number that AP is using
-     * @param neighborFile
-     *            the file that contains the list of neighbors
      * @param containerNames
      *            the file that contains the list of containers to use
-     * @param dockerRegistryHostname
-     *            the name of the host that is running the docker registry
      * @param regionLookupService
      *            how to convert nodes to regions
-     * @param dumpStateEnabled
-     *            sets {@link Controller#setDumpState(boolean)}
-     * @param dumpInterval
-     *            sets {@link Controller#setDumpInterval(Duration)}
-     * @param baseDumpDirectory
-     *            sets {@link Controller#setBaseOutputDirectory(Path)}
-     * @param globalLeaderHostname
-     *            if this node is global leader then set
-     *            {@link Controller#setGlobalLeader(boolean)}
      * @param ipToSpeed
      *            mapping of IP address to speed, passed to
+     *            {@link SimpleDockerResourceManager}
+     * @param ipToDelay
+     *            mapping of IP address to delay, passed to
      *            {@link SimpleDockerResourceManager}
      * @param hardwareConfig
      *            the simulated hardware for this agent that can limit the
      *            capacity of the real hardware, passed to
      *            {@link SimpleDockerResourceManager}
-     * @param excludedSubnets
+     * @param testbedControlSubnets
      *            passed to {@link SimpleDockerResourceManagerFactory}
-     * @param imageFetcherClassname
-     *            passed to {@Link SimpleDockerResourceManagerFactory}
+     * @param parameters
+     *            parameters passed through from the commandline
+     * @param dcopLeaders
+     *            {@link #getDcopForRegion(RegionIdentifier)}
      */
     public HiFiAgent(@Nonnull final NodeIdentifier hostname,
             @Nonnull final Map<String, Object> extraData,
             final int dnsTtlSeconds,
             @Nonnull final ImmutableMap<ApplicationCoordinates, ServiceConfiguration> serviceConfigurations,
-            final int apPort,
-            @Nonnull final Path neighborFile,
-            @Nonnull final ImmutableList<NodeIdentifier> containerNames,
-            @Nonnull final String dockerRegistryHostname,
+            @Nonnull final ImmutableMap<NodeIdentifier, InetAddress> containerNames,
             @Nonnull final FileRegionLookupService regionLookupService,
-            final boolean dumpStateEnabled,
-            @Nonnull final Duration dumpInterval,
-            final Path baseDumpDirectory,
-            @Nonnull final String globalLeaderHostname,
             @Nonnull final ImmutableMap<String, Double> ipToSpeed,
+            @Nonnull final ImmutableMap<String, Double> ipToDelay,
             @Nonnull final HardwareConfiguration hardwareConfig,
-            @Nonnull final ImmutableCollection<SubnetInfo> excludedSubnets,
-            @Nonnull final String imageFetcherClassname) {
+            @Nonnull final ImmutableCollection<SubnetInfo> testbedControlSubnets,
+            @Nonnull final ImmutableMap<RegionIdentifier, NodeIdentifier> dcopLeaders,
+            @Nonnull final Parameters parameters) {
         this.name = hostname;
-        this.lookupService = new DnsNodeLookupService(apPort);
-        this.clock = new AbsoluteClock();
-        this.managerFactory = new SimpleDockerResourceManagerFactory(clock,
-                AgentConfiguration.getInstance().getApRoundDuration().toMillis(), containerNames,
-                dockerRegistryHostname, regionLookupService, apPort, ipToSpeed, hardwareConfig, excludedSubnets,
-                imageFetcherClassname);
-        this.planTranslator = new PlanTranslator(dnsTtlSeconds);
+        this.dcopLeaders = dcopLeaders;
+        if (AgentConfiguration.getInstance().getApUsesControlNetwork()) {
+            this.lookupService = new ControlNetworkLookupService(parameters.apPort);
+            this.dcopLookup = new ControlNetworkLookupService(parameters.dcopPort);
+        } else {
+            this.lookupService = new DnsNodeLookupService(parameters.apPort);
+            this.dcopLookup = new DnsNodeLookupService(parameters.dcopPort);
+        }
 
-        networkFactory = new MapNetworkFactory(lookupService, regionLookupService, managerFactory,
+        this.clock = new AbsoluteClock();
+
+        final SimpleDockerResourceManager.Parameters rmParams = new SimpleDockerResourceManager.Parameters();
+        rmParams.clock = clock;
+        rmParams.pollingInterval = AgentConfiguration.getInstance().getResourceReportInterval().toMillis();
+        rmParams.containerNames = containerNames;
+        rmParams.dockerRegistryHostname = Objects.requireNonNull(parameters.dockerRegistryHostname);
+        rmParams.regionLookupService = regionLookupService;
+        rmParams.apPort = parameters.apPort;
+        rmParams.ipToSpeed = ipToSpeed;
+        rmParams.ipToDelay = ipToDelay;
+        rmParams.hardwareConfig = hardwareConfig;
+        rmParams.testbedControlSubnets = testbedControlSubnets;
+        rmParams.imageFetcherClassname = Objects.requireNonNull(parameters.imageFetcherClassname);
+        rmParams.serviceConfigurationFile = parameters.serviceConfigurationFile;
+        rmParams.serviceDependencyFile = parameters.serviceDependencyFile;
+
+        this.managerFactory = new SimpleDockerResourceManagerFactory(rmParams);
+
+        final DnsResolutionType dnsResolutionType = AgentConfiguration.getInstance().getDnsResolutionType();
+        planTranslator = PlanTranslator.constructPlanTranslator(dnsResolutionType, dnsTtlSeconds);
+
+        networkFactory = new MapNetworkFactory(lookupService, dcopLookup, regionLookupService, managerFactory,
                 AgentConfiguration.getInstance().getApProgram(),
                 AgentConfiguration.getInstance().isApProgramAnonymous(), this, true, true, true,
                 IdentifierUtils::getNodeIdentifier);
 
         this.controller = networkFactory.createServer(name, extraData);
-        this.controller.setDumpInterval(dumpInterval);
-        this.controller.setBaseOutputDirectory(baseDumpDirectory);
-        this.controller.setDumpState(dumpStateEnabled);
+        this.controller.setDumpInterval(Objects.requireNonNull(parameters.dumpInterval));
+        this.controller.setBaseOutputDirectory(parameters.dumpDirectory);
+        this.controller.setDumpState(parameters.dumpEnabled);
 
-        LOGGER.info("Dump interval {} output directory {} dump state enabled {}", dumpInterval, baseDumpDirectory,
-                dumpStateEnabled);
+        LOGGER.info("Dump interval {} output directory {} dump state enabled {}", parameters.dumpInterval,
+                parameters.dumpDirectory, parameters.dumpEnabled);
 
         LOGGER.info("This node has hostname '{}'", hostname);
 
         if (this.controller.isHandleDnsChanges()) {
             // NOTE: this assumes that the node handling DNS changes is the DNS
             // server
-            this.dnsUpdateService = new WeightedDnsUpdateService(this.controller.getRegionIdentifier(),
-                    InetAddress.getLoopbackAddress());
+            switch (dnsResolutionType) {
+            case RECURSIVE:
+                this.dnsUpdateService = new WeightedDnsUpdateServiceRecursive(this.controller.getRegionIdentifier(),
+                        InetAddress.getLoopbackAddress());
+                break;
+            case NON_RECURSIVE:
+                this.dnsUpdateService = new WeightedDnsUpdateServiceNonRecursive(this.controller.getRegionIdentifier(),
+                        InetAddress.getLoopbackAddress());
+                break;
+            case RECURSIVE_TWO_LAYER:
+                this.dnsUpdateService = new WeightedDnsUpdateServiceRecursive2Layer(
+                        this.controller.getRegionIdentifier(), InetAddress.getLoopbackAddress());
+                break;
+            default:
+                throw new RuntimeException("Unexpected DNS resolution type: " + dnsResolutionType);
+            }
+
         } else {
             this.dnsUpdateService = null;
         }
 
-        addNeighbors(neighborFile);
+        addNeighbors(Objects.requireNonNull(parameters.neighborsFile));
 
-        final NodeIdentifier dockerRegistryId = IdentifierUtils.getNodeIdentifier(dockerRegistryHostname);
+        final NodeIdentifier dockerRegistryId = IdentifierUtils
+                .getNodeIdentifier(Objects.requireNonNull(parameters.dockerRegistryHostname));
         if (hostname.equals(dockerRegistryId)) {
             LOGGER.info("The Docker registry should be running on this node.");
             // startDockerRegistry();
         }
 
         if (!AgentConfiguration.getInstance().isUseLeaderElection()) {
-            final NodeIdentifier globalLeaderId = IdentifierUtils.getNodeIdentifier(globalLeaderHostname);
+            final NodeIdentifier globalLeaderId = IdentifierUtils
+                    .getNodeIdentifier(Objects.requireNonNull(parameters.globalLeader));
             if (hostname.equals(globalLeaderId)) {
                 LOGGER.info("This node is the global leader.");
                 this.controller.setGlobalLeader(true);
@@ -813,7 +916,7 @@ public class HiFiAgent implements NetworkServices {
         LOGGER.info("Top of start");
 
         LOGGER.info("Starting simulation driver listener");
-        final Thread simThread = new Thread(() -> SimServer.runServer(ta2), "Simulation Driver Listener");
+        final Thread simThread = new Thread(() -> SimServer.runServer(ta2, controller), "Simulation Driver Listener");
         simThread.setDaemon(true);
         simThread.start();
 
@@ -887,8 +990,11 @@ public class HiFiAgent implements NetworkServices {
         LOGGER.info("Git version: {}", getGitVersionInformation());
     }
 
-    private static ImmutableMap<String, Double> readIpSpeedFile(@Nonnull final Path configurationDirectory) {
+    private static Pair<ImmutableMap<String, Double>, ImmutableMap<String, Double>> readIpSpeedFile(
+            @Nonnull final Path configurationDirectory) {
         final ImmutableMap.Builder<String, Double> ipToSpeed = ImmutableMap.builder();
+        final ImmutableMap.Builder<String, Double> ipToDelay = ImmutableMap.builder();
+
         // filename matches 12-setup-ncps.yml
         final Path ipToSpeedFile = configurationDirectory.resolve("ip-to-speed.txt");
 
@@ -898,18 +1004,28 @@ public class HiFiAgent implements NetworkServices {
                     while (it.hasNext()) {
                         final String line = it.next();
                         final String[] tokens = line.split("\\s+");
-                        if (tokens.length != 2) {
-                            LOGGER.warn("Invalid line parsing {}. Expecting 2 tokens, but got {} in '{}'. Skipping.",
+                        if (tokens.length != 3) {
+                            LOGGER.warn("Invalid line parsing {}. Expecting 3 tokens, but got {} in '{}'. Skipping.",
                                     ipToSpeedFile, tokens.length, line);
                         } else {
                             final String ip = tokens[0];
                             final String speedStr = tokens[1];
+                            final String delayStr = tokens[2];
                             try {
                                 final double speed = Double.valueOf(speedStr);
                                 ipToSpeed.put(ip, speed);
                             } catch (final NumberFormatException e) {
-                                LOGGER.warn("Invalid line parsing {}. Cannot parse '{}' as a double in '{}'. Skipping.",
+                                LOGGER.warn(
+                                        "Invalid line parsing {}. Cannot parse speed '{}' as a double in '{}'. Skipping.",
                                         ipToSpeedFile, speedStr, line, e);
+                            }
+                            try {
+                                final double delay = Double.valueOf(delayStr);
+                                ipToDelay.put(ip, delay);
+                            } catch (final NumberFormatException e) {
+                                LOGGER.warn(
+                                        "Invalid line parsing {}. Cannot parse delay '{}' as a double in '{}'. Skipping.",
+                                        ipToSpeedFile, delayStr, line, e);
                             }
                         }
                     }
@@ -919,7 +1035,7 @@ public class HiFiAgent implements NetworkServices {
             }
         }
 
-        return ipToSpeed.build();
+        return Pair.of(ipToSpeed.build(), ipToDelay.build());
     }
 
     private static ImmutableCollection<SubnetUtils.SubnetInfo> loadExcludedSubnets(final Path excludedSubnetsFile) {
@@ -943,6 +1059,82 @@ public class HiFiAgent implements NetworkServices {
         } catch (final IOException e) {
             throw new RuntimeException("Error reading the excluded subnets file", e);
         }
+    }
+
+    /**
+     * Parse the dcop leaders information from the specified file.
+     * 
+     * @param path
+     *            where to read the data from
+     * @return the map or null on error (an error will be logged)
+     * @throws IOException
+     *             if there is an error reading the file
+     */
+    private static ImmutableMap<RegionIdentifier, NodeIdentifier> parseDcopLeaders(@Nonnull final Path path)
+            throws IOException {
+        if (!Files.exists(path)) {
+            LOGGER.error("{} does not exist", path);
+            return null;
+        }
+
+        final ImmutableMap.Builder<RegionIdentifier, NodeIdentifier> info = ImmutableMap.builder();
+        try (Stream<String> stream = Files.lines(path)) {
+            stream.filter(line -> !(null == line || line.trim().isEmpty())).forEach(line -> {
+                final String[] tokens = line.split("\\s+");
+                if (tokens.length != 2) {
+                    throw new RuntimeException("Invalid DCOP leaders line (expecting 2 tokens): '" + line + "'");
+                }
+                final RegionIdentifier region = new StringRegionIdentifier(tokens[0]);
+                final NodeIdentifier leader = new DnsNameIdentifier(tokens[1]);
+
+                info.put(region, leader);
+            });
+        }
+
+        try {
+            final ImmutableMap<RegionIdentifier, NodeIdentifier> infoMap = info.build();
+
+            if (infoMap.isEmpty()) {
+                LOGGER.error("No DCOP leader information found in {}", path);
+                return null;
+            }
+
+            return infoMap;
+        } catch (final IllegalArgumentException e) {
+            LOGGER.error(
+                    "Building the DCOP leader map failed, it is likely that the file is invalid and contains multiple leaders for the same region: {}",
+                    e.getMessage(), e);
+            return null;
+        }
+    }
+
+    private final ImmutableMap<RegionIdentifier, NodeIdentifier> dcopLeaders;
+
+    /**
+     * Second octet of MAP control network. Network is a slash 16.
+     */
+    public static final int MAP_CONTROL_SECOND_OCTET = 20;
+
+    // the MAP control network is 172.20.0.0/16
+    /**
+     * First octet of MAP control network. Network is a slash 16.
+     */
+    public static final int MAP_CONTROL_FIRST_OCTET = 172;
+
+    @Override
+    @Nonnull
+    public NodeIdentifier getDcopForRegion(@Nonnull RegionIdentifier region) {
+        if (!dcopLeaders.containsKey(region)) {
+            throw new IllegalArgumentException("No DCOP leader for " + region);
+        } else {
+            return dcopLeaders.get(region);
+        }
+    }
+
+    @Override
+    @Nonnull
+    public MapOracle getMapOracle() {
+        return this;
     }
 
 }

@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -58,6 +58,7 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -83,6 +84,7 @@ import com.bbn.map.hifi.simulation.SimDriver;
 import com.bbn.map.hifi.simulation.SimRequest;
 import com.bbn.map.hifi.simulation.SimResponse;
 import com.bbn.map.hifi.simulation.SimResponseStatus;
+import com.bbn.map.hifi.util.AbsoluteClock;
 import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.simulator.ClientLoad;
 import com.bbn.map.utils.JsonUtils;
@@ -93,11 +95,14 @@ import com.bbn.protelis.utils.VirtualClock;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.UnmodifiableIterator;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import oshi.SystemInfo;
@@ -131,8 +136,11 @@ public final class ClientDriver {
     private static final String VERSION_OPT = "version";
 
     private static final long IDLE_THREAD_TIMEOUT_MINUTES = 5;
+
+    private final ThreadFactory javaClientPoolFactory = new ThreadFactoryBuilder().setNameFormat("CPThread" + "-%d")
+            .build();
     private final ExecutorService javaClientPool = new ThreadPoolExecutor(0, Integer.MAX_VALUE,
-            IDLE_THREAD_TIMEOUT_MINUTES, TimeUnit.MINUTES, new SynchronousQueue<Runnable>());
+            IDLE_THREAD_TIMEOUT_MINUTES, TimeUnit.MINUTES, new SynchronousQueue<Runnable>(), javaClientPoolFactory);
 
     /**
      * Print out the usage information. Does not exit, that is up to the caller.
@@ -391,7 +399,7 @@ public final class ClientDriver {
                 }
 
                 final ApplicationSpecification appSpec = AppMgrUtils.getApplicationSpecification(service);
-                final String serviceHostname = appSpec.getServiceHostname();
+                final String serviceHostname = DnsUtils.getFullyQualifiedServiceHostname(appSpec);
 
                 if (ClientServiceConfiguration.ExecutionType.EXTERNAL_PROCESS.equals(serviceConfig.getStartType())) {
                     final ProcessBuilder builder = new ProcessBuilder(serviceConfig.getStartArguments());
@@ -505,10 +513,10 @@ public final class ClientDriver {
     private void runScenario() {
         LOGGER.info("Starting client driver thread");
 
-        final Timer stopTimer = new Timer("Client Driver stop timer", true);
+        final VirtualClock globalClock = new AbsoluteClock();
+        globalClock.startClock();
 
-        // need a relative clock to be compatible with the demand files
-        final VirtualClock clock = new SimpleClock();
+        final Timer stopTimer = new Timer("Client Driver stop timer", true);
 
         LOGGER.info("Waiting for start command from simulation driver");
 
@@ -522,8 +530,15 @@ public final class ClientDriver {
             }
         }
 
-        LOGGER.info("Starting the client");
+        final long startTime = waitingForStart.getStartTime();
+        if (startTime >= 0) {
+            LOGGER.info("Waiting until {} to start", startTime);
+            globalClock.waitUntilTime(startTime);
+        }
 
+        LOGGER.info("Starting the client");
+        // need a relative clock to be compatible with the demand files
+        final VirtualClock clock = new SimpleClock();
         clock.startClock();
 
         long latestStop = 0;
@@ -542,23 +557,27 @@ public final class ClientDriver {
             Objects.requireNonNull(serviceConfig, "Unable to find client service configuration for " + service);
 
             for (int clientIndex = 0; clientIndex < req.getNumClients(); ++clientIndex) {
-                LOGGER.info("Starting client {}", clientIndex);
-                final ClientInstance client = startClient(serviceConfig, req, clientIndex);
-                synchronized (clients) {
-                    clients.add(client);
-                }
-
-                final long duration = Math.max(req.getNetworkDuration(), req.getServerDuration())
-                        + CLIENT_STOP_FINISH_MS;
-                stopTimer.schedule(new TimerTask() {
-                    public void run() {
-                        // force client to stop if it hasn't already
-                        stopClient(client);
+                try {
+                    LOGGER.info("Starting client {}", clientIndex);
+                    final ClientInstance client = startClient(serviceConfig, req, clientIndex);
+                    synchronized (clients) {
+                        clients.add(client);
                     }
-                }, duration);
 
-                final long endTime = clock.getCurrentTime() + duration;
-                latestStop = Math.max(latestStop, endTime);
+                    final long duration = Math.max(req.getNetworkDuration(), req.getServerDuration())
+                            + CLIENT_STOP_FINISH_MS;
+                    stopTimer.schedule(new TimerTask() {
+                        public void run() {
+                            // force client to stop if it hasn't already
+                            stopClient(client);
+                        }
+                    }, duration);
+
+                    final long endTime = clock.getCurrentTime() + duration;
+                    latestStop = Math.max(latestStop, endTime);
+                } catch (final Exception e) {
+                    LOGGER.error("Error starting client {}, skipping", clientIndex, e);
+                }
             }
 
         } // while running and demand left to execute
@@ -734,12 +753,13 @@ public final class ClientDriver {
                                 switch (req.getType()) {
                                 case START:
                                     LOGGER.trace("Got start request");
-                                    synchronized (waitingForStart) {
-                                        waitingForStart.set(false);
-                                        waitingForStart.notifyAll();
+                                    final String startResult = handleStartMessage(mapper, req);
+                                    if (null == startResult) {
+                                        resp.setStatus(SimResponseStatus.OK);
+                                    } else {
+                                        resp.setStatus(SimResponseStatus.ERROR);
+                                        resp.setMessage(startResult);
                                     }
-
-                                    resp.setStatus(SimResponseStatus.OK);
                                     break;
                                 case SHUTDOWN:
                                     resp.setStatus(SimResponseStatus.OK);
@@ -758,11 +778,16 @@ public final class ClientDriver {
                                 mapper.writeValue(writer, resp);
                             }
 
-                        } catch (final IOException e) {
-                            LOGGER.warn("Got IO exception", e);
-                            if (socket.isClosed()) {
-                                running.set(false);
+                        } catch (final IOException | RuntimeException e) {
+                            LOGGER.error("Got exception. Closing socket and stopping loop:", e);
+
+                            try {
+                                socket.close();
+                            } catch (IOException e2) {
+                                LOGGER.error("Error closing socket:", e2);
                             }
+
+                            running.set(false);
                         }
                     } // while running
 
@@ -773,7 +798,34 @@ public final class ClientDriver {
                 running.set(false);
             } // log context
         }
-    }
+
+        private String handleStartMessage(final ObjectMapper mapper, final SimRequest req) {
+            final JsonNode tree = req.getPayload();
+            if (null != tree) {
+                try {
+                    final long time = mapper.treeToValue(tree, long.class);
+                    waitingForStart.setStartTime(time);
+
+                    synchronized (waitingForStart) {
+                        waitingForStart.set(false);
+                        waitingForStart.notifyAll();
+                    }
+
+                    // success
+                    return null;
+                } catch (final JsonProcessingException e) {
+                    LOGGER.error("Got error decoding topology update payload", e);
+
+                    final String error = String.format(
+                            "Got error decoding topology update payload, skipping processing of message: %s", e);
+                    return error;
+                }
+            } else {
+                LOGGER.warn("Skipping topology update with null payload");
+                return "Got null payload on topology update, ignoring";
+            }
+        }
+    } // class SimHandler
 
     /**
      * Simple class to track the state of waiting for start. This isn't just a
@@ -789,6 +841,16 @@ public final class ClientDriver {
 
         public boolean get() {
             return value;
+        }
+
+        private long startTime = -1;
+
+        public void setStartTime(final long v) {
+            startTime = v;
+        }
+
+        public long getStartTime() {
+            return startTime;
         }
     }
 }

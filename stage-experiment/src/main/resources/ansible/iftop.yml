@@ -1,0 +1,40 @@
+---
+- hosts: registry
+  become: yes
+  tasks:
+    - name: "Install packages to build iftop"
+      apt:
+        name:
+          - automake
+          - build-essential
+          - libpcap0.8-dev
+          - libncurses-dev
+          
+    - name: "Copy iftop.tar.gz to node"
+      copy:
+        src: iftop.tar.gz
+        dest: /tmp/iftop.tar.gz
+    - name: "Copy build script to node"
+      copy:
+        src: build-iftop.sh
+        dest: /tmp/build-iftop.sh
+        mode: 0755
+    - name: "Build iftop"
+      command: /tmp/build-iftop.sh
+      
+    - name: "Fetch iftop executable"
+      fetch:
+        src: /tmp/iftop/iftop
+        dest: ./
+        flat: yes
+        
+- hosts: all
+  become: yes
+  tasks:
+    - name: "Deploy iftop executable"
+      copy:
+        src: iftop
+        dest: /var/lib/map/iftop
+        mode: 0755
+
+      

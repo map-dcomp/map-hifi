@@ -1,0 +1,19 @@
+---
+- import_playbook: flow-stop.yml
+- import_playbook: 05-cleanup.yml
+- import_playbook: clear-docker.yml
+  when: prefetch_images == "0"
+- import_playbook: 10-setup.yml
+- import_playbook: flow-install.yml
+  when: collect_flow_data == "1"
+- import_playbook: 11-registry.yml
+- import_playbook: 11-copy-registry-images_{{testbed}}.yml
+- import_playbook: 12-setup-ncps.yml
+- import_playbook: 13-setup-clients.yml
+- import_playbook: iftop.yml
+- import_playbook: 14-setup-sim-driver.yml
+- import_playbook: 14-copy-control-names_{{testbed}}.yml
+- import_playbook: 15-copy-flink-traces_{{testbed}}.yml
+- import_playbook: 15-docker-networking.yml
+
+  

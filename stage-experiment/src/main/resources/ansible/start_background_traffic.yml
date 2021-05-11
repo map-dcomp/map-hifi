@@ -2,9 +2,8 @@
 - hosts: all
   become: yes
   tasks:
-    - name: start service
+    - name: start background traffic service
       systemd:
         name: background-traffic-driver
         state: started
         enabled: yes
-        daemon-reload: yes

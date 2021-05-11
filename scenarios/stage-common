@@ -7,10 +7,11 @@ help() {
 }
 
 # parse arguments
-emulab_experiment=""
+experiment=""
 agent_configuration=""
 output_dir=""
 client_service_config=""
+pass_args=""
 while [ $# -gt 0 ]; do
     case $1 in
         --help|-h)
@@ -27,7 +28,7 @@ while [ $# -gt 0 ]; do
             if [ -z "$2" ]; then
                 fatal "--experiment is missing argument"
             fi
-            emulab_experiment=$2
+            experiment=$2
             shift
             ;;
         --agent-configuration)
@@ -73,14 +74,14 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         *)
-            error "Unknown argument $1"
-            help
+            # pass everything else through to stage experiment as extra arguments
+            pass_args="${pass_args} $1"
             ;;
     esac
     shift
 done
 
-if [ -z "${emulab_experiment}" ]; then
+if [ -z "${experiment}" ]; then
    help
 fi
 
@@ -102,6 +103,37 @@ fi
 if [ ! -e "${client_service_config}" ]; then
     fatal "Cannot find client service config: ${client_service_config}"
 fi
+
+# check that the scenario name and experiment name are valid for DCOMP
+case "${experiment}" in
+    [a-zA-z]*)
+        ;;
+    *)
+        fatal "Experiment name must start with a letter"
+        ;;
+esac
+
+result=$(echo "${experiment}" | grep -E "^[[:alnum:]]*$" > /dev/null)
+if [ $? -ne 0 ]; then
+    fatal "invalid characters in experiment name, must contain only letters and numbers"
+fi
+
+case "${scenario_name}" in
+    [a-zA-z]*)
+        ;;
+    *)
+        fatal "Scenario name name must start with a letter"
+        ;;
+esac
+
+result=$(echo "${scenario_name}" | grep -E "^[[:alnum:]]*$" > /dev/null)
+if [ $? -ne 0 ]; then
+    fatal "invalid characters in scenario name name, must contain only letters and numbers"
+fi
+
+
+# end checks
+
 
 agent_jar=$(ls -rt "${hifi_base}"/hifi-resmgr/build/libs/hifi-resmgr-*-executable.jar | tail -1)
 dns_jar=$(ls -rt "${hifi_base}"/DnsServer/build/libs/DnsServer-*-executable.jar | tail -1)
@@ -128,11 +160,12 @@ try java -jar ${stage_experiment_jar} \
      --client-pre-start-jar ${client_pre_start_jar} \
      --sim-driver-jar ${sim_driver_jar} \
      --background-driver-jar ${background_driver_jar} \
-     --emulab-experiment ${emulab_experiment} \
+     --emulab-experiment ${experiment} \
      --dumpEnabled \
      --dumpDirectory /var/lib/map/agent \
      --client-service-config "${client_service_config}" \
      --scenario "${scenario_dir}" \
      --demand "${demand_dir}" \
      --output "${output_dir}" \
-     --scenario-name ${scenario_name}
+     --scenario-name ${scenario_name} \
+     ${pass_args}

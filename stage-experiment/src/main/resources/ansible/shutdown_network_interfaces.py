@@ -1,5 +1,5 @@
 #BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-# Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+# Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 # To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 # the exception of the dcop implementation identified below (see notes).
 # 
@@ -48,9 +48,9 @@ with warnings.catch_warnings():
     import map_common
     import ipaddress
     import subprocess
+    import start_network_interfaces
     
 script_dir=os.path.abspath(os.path.dirname(__file__))
-
 
 def get_logger():
     return logging.getLogger(__name__)
@@ -97,9 +97,11 @@ def main(argv=None):
     control_networks = map_common.load_excluded_subnets()
     interfaces = map_common.get_all_interfaces()
     experiment_interfaces = map_common.get_experiment_interfaces(interfaces, control_networks)
-    
-    for (ifce, ip, subnet) in experiment_interfaces:
-        shutdown_nic(ifce)
+
+    with open(start_network_interfaces.ifce_file, 'w') as f:
+        for (ifce, ip, subnet) in experiment_interfaces:
+            shutdown_nic(ifce)
+            print(ifce, file=f)
     
         
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -48,6 +48,7 @@ import org.apache.logging.log4j.CloseableThreadContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.bbn.map.Controller;
 import com.bbn.map.hifi.simulation.SimDriver;
 import com.bbn.map.hifi.simulation.SimRequest;
 import com.bbn.map.hifi.simulation.SimResponse;
@@ -89,8 +90,10 @@ public final class SimServer {
      * 
      * @param ta2
      *            where to send topology update information
+     * @param controller
+     *            notified when the algorithms should start
      */
-    public static void runServer(@Nonnull final TA2Impl ta2) {
+    public static void runServer(@Nonnull final TA2Impl ta2, @Nonnull final Controller controller) {
         LOGGER.info("Starting server");
         try (ServerSocket server = new ServerSocket(SimDriver.PORT)) {
             while (true) {
@@ -99,7 +102,7 @@ public final class SimServer {
                     final Socket socket = server.accept();
                     LOGGER.debug("Got connection from {}", socket.getLocalSocketAddress().toString());
 
-                    final SimHandler handler = new SimHandler(ta2, socket);
+                    final SimHandler handler = new SimHandler(ta2, controller, socket);
                     handler.setDaemon(true);
                     handler.start();
                 } catch (final IOException e) {
@@ -115,10 +118,12 @@ public final class SimServer {
     private static final class SimHandler extends Thread {
         private final Socket socket;
         private final TA2Impl ta2;
+        private final Controller controller;
 
-        private SimHandler(final TA2Impl ta2, final Socket socket) {
+        private SimHandler(final TA2Impl ta2, final Controller controller, final Socket socket) {
             this.ta2 = ta2;
             this.socket = socket;
+            this.controller = controller;
         }
 
         private AtomicBoolean running = new AtomicBoolean(false);
@@ -150,12 +155,17 @@ public final class SimServer {
                                 final SimResponse resp = new SimResponse();
                                 switch (req.getType()) {
                                 case START:
-                                    LOGGER.trace("Got start request");
-                                    resp.setStatus(SimResponseStatus.ERROR);
-                                    resp.setMessage("NCPs don't know how to handle START");
+                                    LOGGER.debug("Got start request");
+                                    final String startResult = handleStartMessage(mapper, req);
+                                    if (null == startResult) {
+                                        resp.setStatus(SimResponseStatus.OK);
+                                    } else {
+                                        resp.setStatus(SimResponseStatus.ERROR);
+                                        resp.setMessage(startResult);
+                                    }
                                     break;
                                 case SHUTDOWN:
-                                    LOGGER.trace("Got shutdown request");
+                                    LOGGER.debug("Got shutdown request");
                                     resp.setStatus(SimResponseStatus.OK);
 
                                     // schedule to run in 30 seconds
@@ -167,7 +177,7 @@ public final class SimServer {
                                     }, Duration.ofSeconds(SECONDS_TO_WAIT_FOR_SHUTDOWN).toMillis());
                                     break;
                                 case TOPOLOGY_UPDATE:
-                                    LOGGER.trace("Got topology update");
+                                    LOGGER.debug("Got topology update");
                                     final String topologyResult = handleTopologyUpdate(mapper, req);
                                     if (null == topologyResult) {
                                         resp.setStatus(SimResponseStatus.OK);
@@ -177,6 +187,7 @@ public final class SimServer {
                                     }
                                     break;
                                 default:
+                                    LOGGER.warn("Got unknown request: {}", req.getType());
                                     resp.setStatus(SimResponseStatus.ERROR);
                                     resp.setMessage("Unknown request: " + req.getType());
                                     break;
@@ -185,13 +196,20 @@ public final class SimServer {
                                 mapper.writeValue(writer, resp);
                             }
 
-                        } catch (final IOException e) {
-                            LOGGER.warn("Got IO exception", e);
-                            if (socket.isClosed()) {
-                                running.set(false);
+                        } catch (final IOException | RuntimeException e) {
+                            LOGGER.error("Got exception. Closing socket and stopping loop:", e);
+
+                            try {
+                                socket.close();
+                            } catch (IOException e2) {
+                                LOGGER.error("Error closing socket:", e2);
                             }
+
+                            running.set(false);
                         }
                     } // while running
+
+                    LOGGER.info("Finished run loop");
 
                 } catch (final IOException e) {
                     LOGGER.error("Error getting socket streams", e);
@@ -253,6 +271,28 @@ public final class SimServer {
             } catch (final InterruptedException e) {
                 e.printStackTrace();
                 LOGGER.error("Interrupted waiting for simulated shutdown", e);
+            }
+        }
+
+        private String handleStartMessage(final ObjectMapper mapper, final SimRequest req) {
+            final JsonNode tree = req.getPayload();
+            if (null != tree) {
+                try {
+                    final long time = mapper.treeToValue(tree, long.class);
+                    controller.startAlgorithmsAt(time);
+
+                    // success
+                    return null;
+                } catch (final JsonProcessingException e) {
+                    LOGGER.error("Got error decoding topology update payload", e);
+
+                    final String error = String.format(
+                            "Got error decoding topology update payload, skipping processing of message: %s", e);
+                    return error;
+                }
+            } else {
+                LOGGER.warn("Skipping topology update with null payload");
+                return "Got null payload on topology update, ignoring";
             }
         }
 

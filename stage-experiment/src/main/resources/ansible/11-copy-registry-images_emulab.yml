@@ -4,6 +4,6 @@
     - name: Copy images for the registry (Emulab)
       copy:
         src: /proj/a3/map/registry/map_service_images.tar
-        dest: /var/lib/map/registry
+        dest: /var/lib/map/registry/map_service_images.tar
         owner: root
         mode: 0444       

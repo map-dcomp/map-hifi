@@ -2,9 +2,8 @@
 - hosts: registry
   become: yes
   tasks:
-    - name: stop service
+    - name: stop simulation driver service
       systemd:
         name: sim-driver
         state: stopped
-        enabled: yes
-        daemon-reload: yes
+        enabled: no

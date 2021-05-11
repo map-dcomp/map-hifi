@@ -9,7 +9,7 @@
         mode: u=rwx,g=rx,o=rx
         owner: map
       
-    - name: install script
+    - name: install system stats script
       copy:
         src: map_system_stats.py
         dest: /var/lib/map/system_stats/map_system_stats.py
@@ -19,9 +19,6 @@
 
     - name: install psutil package
       apt:
-        update_cache: yes
-        name: "{{ packages }}"
-      vars:
-        packages:
-        - python3-psutil
+        name: 
+          - python3-psutil
         

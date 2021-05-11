@@ -1,5 +1,5 @@
 #BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-# Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+# Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 # To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 # the exception of the dcop implementation identified below (see notes).
 # 
@@ -50,6 +50,7 @@ with warnings.catch_warnings():
     
 script_dir=os.path.abspath(os.path.dirname(__file__))
 
+ifce_file='/etc/map/experiment_interfaces_shutdown'
 
 def get_logger():
     return logging.getLogger(__name__)
@@ -97,9 +98,12 @@ def main(argv=None):
 
     setup_logging(default_path=args.logconfig)
 
-    interfaces = map_common.get_all_interfaces()
-    for (ifce, ip, subnet) in interfaces:
-        start_nic(ifce)
+    experiment_interfaces_file = Path(ifce_file)
+    if experiment_interfaces_file.exists():
+        with open(experiment_interfaces_file) as f:
+            for line in f:
+                ifce = line.strip()
+                start_nic(ifce)
     
         
 if __name__ == "__main__":

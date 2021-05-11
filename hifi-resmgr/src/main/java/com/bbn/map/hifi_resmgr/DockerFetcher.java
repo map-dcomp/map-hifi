@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -75,14 +75,22 @@ public class DockerFetcher implements ImageFetcher {
             pullResult = SimpleDockerResourceManager.pullDockerImage(image,
                     SimpleDockerResourceManager.DEFAULT_DOCKER_IMAGE_TAG);
             if (!pullResult) {
-                LOGGER.warn("Pull attempt {} failed", attempt);
-            }
-            final long positiveRandom = Math.abs(pullBackoffRandom.nextLong() / 2);
-            final long sleepMs = positiveRandom % pullBackoffInterval + minPullBackoff.toMillis();
-            try {
-                Thread.sleep(sleepMs);
-            } catch (final InterruptedException e) {
-                LOGGER.warn("Got interrupted sleeping between pull attempts", e);
+                boolean lastAttempt = (attempt >= AgentConfiguration.getInstance().getMaxPullAttemps() - 1);
+                        
+                if (!lastAttempt) {
+                    final long positiveRandom = Math.abs(pullBackoffRandom.nextLong() / 2);
+                    final long sleepMs = positiveRandom % pullBackoffInterval + minPullBackoff.toMillis();
+                    
+                    LOGGER.warn("Pull attempt {} failed. Waiting {} ms before next attempt.", attempt, sleepMs);
+                    
+                    try {
+                        Thread.sleep(sleepMs);
+                    } catch (final InterruptedException e) {
+                        LOGGER.warn("Got interrupted sleeping between pull attempts", e);
+                    }
+                } else {
+                    LOGGER.warn("Last pull attempt ({}) failed.", attempt);                    
+                }
             }
         }
         LOGGER.info("Pulling docker container result: " + pullResult);

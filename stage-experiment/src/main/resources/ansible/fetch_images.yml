@@ -1,14 +1,18 @@
 ---
 - hosts: ncps
   become: yes
+  serial: 40
 
   tasks:
-    - name: install script
+    - name: install fetch images script
       copy:
         src: fetch_service_images.py
         dest: /etc/map/fetch_service_images.py
         mode: u=rwx,g=rx,o=rx
 
-    - name: execute script
+    - name: execute fetch images script
       shell: "/etc/map/fetch_service_images.py"
+      register: result
+      until: result is not failed
+      retries: 10
       

@@ -1,0 +1,6 @@
+---
+- import_playbook: flow-start.yml
+  when: collect_flow_data == "1"
+- import_playbook: 52-start_clients.yml
+- import_playbook: start_background_traffic.yml
+- import_playbook: 55-start_sim-driver.yml

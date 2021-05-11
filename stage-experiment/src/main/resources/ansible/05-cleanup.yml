@@ -37,7 +37,7 @@
 - hosts: dns_servers
   become: yes
   tasks:
-    - name: stop service
+    - name: stop dns service
       systemd:
         name: map-dns
         state: stopped
@@ -81,3 +81,5 @@
       shell: docker ps -q | xargs -r docker stop
     - name: remove all docker containers
       shell: docker container prune -f
+    - name: remove unused docker volumes
+      shell: docker volume prune -f

@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -68,8 +68,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import javax.annotation.Nonnull;
@@ -79,7 +77,6 @@ import org.apache.commons.net.util.SubnetUtils;
 import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.xbill.DNS.Address;
 
 import com.bbn.map.AgentConfiguration;
 import com.bbn.map.Controller;
@@ -91,6 +88,7 @@ import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi.util.SimAppUtils;
 import com.bbn.map.simulator.HardwareConfiguration;
 import com.bbn.map.simulator.NetworkDemandTracker;
+import com.bbn.map.simulator.Simulation;
 import com.bbn.map.utils.JsonUtils;
 import com.bbn.protelis.networkresourcemanagement.ContainerParameters;
 import com.bbn.protelis.networkresourcemanagement.ContainerResourceReport;
@@ -112,7 +110,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableCollection;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 
@@ -144,10 +141,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     // Host bind mount source paths
     private static final String HOST_CONTAINER_SHARED_BASE_FOLDER_PATH = "/var/lib/map/agent/container_data";
     private static final String HOST_SERVICE_SHARED_BASE_FOLDER_PATH = "/var/lib/map/agent/service_data";
-    private static final String HOST_CONTAINER_DATA_LOCATION = "instance_data";
-
     // Container bind mount target paths
-    private static final String CONTAINER_DATA_TARGET_LOCATION = "/" + HOST_CONTAINER_DATA_LOCATION;
+    private static final String CONTAINER_DATA_TARGET_LOCATION = "/" + SimAppUtils.HOST_CONTAINER_DATA_LOCATION;
     private static final String CONTAINER_SERVICE_DATA_LOCATION = "/service_data";
 
     // Unit conversions
@@ -167,6 +162,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     private static final int DOCKER_START_CONTAINER_ATTEMPTS = 3;
     private static final int DOCKER_START_CONTAINER_MAX_RETRY_DELAY = 100; // milliseconds
     private static final int DOCKER_START_CONTAINER_MIN_RETRY_DELAY = 20; // milliseconds
+    private static final int DOCKER_RESPONSE_CODE_LIST_IMAGES = 200;
 
     private static final String HTTP_GET = "GET";
     private static final String HTTP_POST = "POST";
@@ -178,7 +174,9 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     // null until init() is called
     private NCPResourceMonitor ncpResourceMonitor;
 
-    private ScheduledThreadPoolExecutor resourceReportTimer = null;
+    private final boolean useFailedRequestsInDemand;
+
+    private Thread updateResourceReportsThread = null;
     private final Object resourceReportLock = new Object();
     private ResourceReport shortResourceReport;
     private ResourceReport longResourceReport;
@@ -195,7 +193,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     private final Map<NodeIdentifier, MapContainer> runningContainers = new ConcurrentHashMap<>();
     private Controller node;
     private final VirtualClock clock;
-    private final ImmutableList<NodeIdentifier> containerNames;
+    private final ImmutableMap<NodeIdentifier, InetAddress> containerNames;
 
     private String dockerRegistryHostname;
     /**
@@ -210,12 +208,16 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     private final int apPort;
 
     private final ImmutableMap<String, Double> ipToSpeed;
+    private final ImmutableMap<String, Double> ipToDelay;
 
     private final HardwareConfiguration hardwareConfig;
 
-    private final ImmutableCollection<SubnetUtils.SubnetInfo> excludedSubnets;
+    private final ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets;
 
     private final DockerImageManager imageManager;
+
+    private final Path serviceConfigurationFile;
+    private final Path serviceDependencyFile;
 
     /**
      * @return the port that AP communicates on
@@ -254,16 +256,19 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                 .collect(Collectors.toList());
     }
 
-    private static ImmutableList<NodeIdentifier> limitContainersToMatchHardwareConfig(
-            final ImmutableList<NodeIdentifier> origContainerNames,
+    private static ImmutableMap<NodeIdentifier, InetAddress> limitContainersToMatchHardwareConfig(
+            final ImmutableMap<NodeIdentifier, InetAddress> origContainerNames,
             final HardwareConfiguration hardwareConfig) {
         final int hardwareContainers = hardwareConfig.getMaximumServiceContainers();
         final int numContainers = Math.min(origContainerNames.size(), hardwareContainers);
 
-        final ImmutableList<NodeIdentifier> retval;
+        final ImmutableMap<NodeIdentifier, InetAddress> retval;
         if (numContainers < origContainerNames.size()) {
-            // need to trim
-            retval = origContainerNames.subList(0, numContainers);
+            retval = origContainerNames.entrySet().stream() //
+                    .limit(numContainers) //
+                    .collect(Collectors.collectingAndThen(//
+                            Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue), //
+                            ImmutableMap::copyOf));
         } else {
             // can't be larger, so must be just right
             retval = origContainerNames;
@@ -273,56 +278,97 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         return retval;
     }
 
+    // CHECKSTYLE:OFF - data class
     /**
-     * 
-     * @param clock
-     *            keeps track of time for this resource manager
-     * @param pollingInterval
-     *            interval for polling resource usage and creating
-     *            {@link ResourceReport} objects
-     * @param containerNames
-     *            the available names to use for new containers
-     * @param dockerRegistryHostname
-     *            the host that is running the docker registry
-     * @param regionLookupService
-     *            used to find the region of network traffic
-     * @param apPort
-     *            the port that AP communicates on
-     * @param ipToSpeed
-     *            used to map IP addresses to speeds specified in the topology
-     *            file for handling simulated speeds
-     * @param hardwareConfig
-     *            the hardware configuration that overrides what is found on the
-     *            real hardware for simulation testing
-     * @param excludedSubnets
-     *            passed to
-     *            {@link NCPResourceMonitor#NCPResourceMonitor(long, RegionIdentifier, FileRegionLookupService, int, ImmutableCollection)}
-     * @param imageFetcherClassname
-     *            passed to
-     *            {@link DockerImageManager#DockerImageManager(String)}
+     * Parameters for SimpleDockerResourceManager.
      */
-    public SimpleDockerResourceManager(@Nonnull final VirtualClock clock,
-            final long pollingInterval,
-            @Nonnull final ImmutableList<NodeIdentifier> containerNames,
-            @Nonnull final String dockerRegistryHostname,
-            @Nonnull final FileRegionLookupService regionLookupService,
-            final int apPort,
-            @Nonnull final ImmutableMap<String, Double> ipToSpeed,
-            @Nonnull final HardwareConfiguration hardwareConfig,
-            @Nonnull final ImmutableCollection<SubnetUtils.SubnetInfo> excludedSubnets,
-            @Nonnull final String imageFetcherClassname) {
+    public static final class Parameters {
+        /**
+         * keeps track of time for this resource manager.
+         */
+        public VirtualClock clock;
+        /**
+         * interval for polling resource usage and creating
+         * {@link ResourceReport} objects.
+         */
+        public long pollingInterval;
+        /**
+         * the available names to use for new containers.
+         */
+        public ImmutableMap<NodeIdentifier, InetAddress> containerNames;
+        /**
+         * the host that is running the docker registry.
+         */
+        public String dockerRegistryHostname;
+        /**
+         * used to find the region of network traffic.
+         */
+        public FileRegionLookupService regionLookupService;
+        /**
+         * the port that AP communicates on.
+         */
+        public int apPort;
+        /**
+         * used to map IP addresses to speeds specified in the topology file for
+         * handling simulated speeds.
+         */
+        public ImmutableMap<String, Double> ipToSpeed;
+        /**
+         * used to map IP addresses to delays specified in the topology file for
+         * handling simulated link delays.
+         */
+        public ImmutableMap<String, Double> ipToDelay;
+        /**
+         * the hardware configuration that overrides what is found on the real
+         * hardware for simulation testing.
+         */
+        public HardwareConfiguration hardwareConfig;
+        /**
+         * passed to
+         * {@link NCPResourceMonitor#NCPResourceMonitor(long, RegionIdentifier, FileRegionLookupService, int, ImmutableCollection)}.
+         */
+        public ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets;
+        /**
+         * passed to {@link DockerImageManager#DockerImageManager(String)}.
+         */
+        public String imageFetcherClassname;
 
-        this.clock = clock;
-        this.pollingInterval = pollingInterval;
-        this.containerNames = limitContainersToMatchHardwareConfig(containerNames, hardwareConfig);
-        this.dockerRegistryHostname = dockerRegistryHostname;
+        /**
+         * Path to the service configurations file. This is copied into service
+         * containers.
+         */
+        public Path serviceConfigurationFile;
+        /**
+         * Path to the service dependency file. This is copied into service
+         * containers.
+         */
+        public Path serviceDependencyFile;
+
+    }
+    // CHECKSTYLE:ON
+
+    /**
+     * @param params
+     *            all parameters
+     */
+    public SimpleDockerResourceManager(@Nonnull final Parameters params) {
+        // cache value so that it isn't checked every time
+        this.useFailedRequestsInDemand = AgentConfiguration.getInstance().getUseFailedRequestsInDemand();
+
+        this.clock = Objects.requireNonNull(params.clock);
+        this.pollingInterval = params.pollingInterval;
+        this.dockerRegistryHostname = Objects.requireNonNull(params.dockerRegistryHostname);
         this.networkDemandTracker = new NetworkDemandTracker();
-        this.regionLookupService = regionLookupService;
-        this.apPort = apPort;
-        this.ipToSpeed = ipToSpeed;
-        this.hardwareConfig = hardwareConfig;
-        this.excludedSubnets = excludedSubnets;
-        this.imageManager = new DockerImageManager(imageFetcherClassname);
+        this.regionLookupService = Objects.requireNonNull(params.regionLookupService);
+        this.apPort = params.apPort;
+        this.ipToSpeed = Objects.requireNonNull(params.ipToSpeed);
+        this.ipToDelay = Objects.requireNonNull(params.ipToDelay);
+        this.hardwareConfig = Objects.requireNonNull(params.hardwareConfig);
+        this.testbedControlSubnets = Objects.requireNonNull(params.testbedControlSubnets);
+        this.containerNames = limitContainersToMatchHardwareConfig(params.containerNames, params.hardwareConfig);
+        this.imageManager = new DockerImageManager(Objects.requireNonNull(params.imageFetcherClassname));
+        this.serviceConfigurationFile = Objects.requireNonNull(params.serviceConfigurationFile);
+        this.serviceDependencyFile = Objects.requireNonNull(params.serviceDependencyFile);
 
         LOGGER.info("Using Docker registry at node '" + dockerRegistryHostname + "'.");
 
@@ -341,7 +387,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         this.longResourceReport = ResourceReport.getNullReport(node.getNodeIdentifier(), EstimationWindow.LONG);
 
         ncpResourceMonitor = new NCPResourceMonitor(pollingInterval, node.getRegionIdentifier(), regionLookupService,
-                apPort, excludedSubnets);
+                apPort, testbedControlSubnets);
 
         // start polling and updating resource reports
         start();
@@ -357,16 +403,41 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
 
         LOGGER.info("Starting SimpleDockerResourceManager monitoring and polling");
 
-        if (null != resourceReportTimer) {
+        if (null != updateResourceReportsThread) {
             throw new IllegalStateException("Cannot start when it is already running");
         }
-        resourceReportTimer = new ScheduledThreadPoolExecutor(1);
-        resourceReportTimer.scheduleAtFixedRate(() -> updateResourceReports(), 0, pollingInterval,
-                TimeUnit.MILLISECONDS);
+
+        updateResourceReportsThread = new Thread(() -> runUpdateResourceReports());
+        updateResourceReportsThread.setName("updateResourceReports");
+        updateResourceReportsThread.start();
 
         runningContainers.forEach((id, sim) -> {
             sim.start();
         });
+    }
+
+    private void runUpdateResourceReports() {
+        while (true) {
+            try {
+                final long start = System.currentTimeMillis();
+
+                // update the resource reports
+                updateResourceReports();
+
+                final long executionTime = System.currentTimeMillis() - start;
+                LOGGER.debug(
+                        "ResourceReport update starting at time {} took {} ms to execute, and the polling interval is {} ms.",
+                        start, executionTime, pollingInterval);
+
+                final long remaining = pollingInterval - executionTime;
+                if (remaining > 0) {
+                    LOGGER.debug("sleeping for {} ms before next ResourceReport update", remaining);
+                    Thread.sleep(remaining);
+                }
+            } catch (final InterruptedException e) {
+                LOGGER.debug("ResourceReport generation thread got interrupted", e);
+            }
+        }
     }
 
     @Override
@@ -436,11 +507,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         Objects.requireNonNull(service);
         Objects.requireNonNull(parameters);
 
-        LOGGER.info("**** Start service ****");
-
-        LOGGER.info("Start service: " + service + "\nWith parameters:\n"
-                + resourceReportImmutableMapToString("Compute capacity: ", 1, parameters.getComputeCapacity())
-                + resourceReportImmutableMapToString("Network capacity: ", 1, parameters.getNetworkCapacity()));
+        LOGGER.info("**** Start service: start service {} with compute capacity {} and network capacity {}", service,
+                parameters.getComputeCapacity(), parameters.getNetworkCapacity());
 
         if (!waitForImage(service)) {
             LOGGER.warn("Image fetch failed for service {}", service);
@@ -448,22 +516,16 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         }
 
         // get next available container name
-        final NodeIdentifier containerId = getAvailableContainerName();
+        final Map.Entry<NodeIdentifier, InetAddress> availableContainer = getAvailableContainerName();
 
-        if (containerId != null) {
+        if (availableContainer != null) {
+            final NodeIdentifier containerId = availableContainer.getKey();
             final String containerName = containerId.getName();
 
-            final String containerIP;
-            final InetAddress containerAddress;
-            try {
-                containerIP = DnsUtils.getPrimaryIp(containerName);
-                containerAddress = Address.getByName(containerIP);
-            } catch (final UnknownHostException e) {
-                LOGGER.error("Unable to get IP address for container name {}, unable to start service", containerName);
-                return null;
-            }
+            final InetAddress containerAddress = availableContainer.getValue();
 
-            LOGGER.info("**** Start service: Obtained container name '{}' and IP '{}'.", containerName, containerIP);
+            LOGGER.info("**** Start service: Obtained container name '{}' and IP '{}'.", containerName,
+                    containerAddress);
 
             // get parameter values
             final Double cpus = parameters.getComputeCapacity().getOrDefault(NodeAttribute.CPU,
@@ -501,7 +563,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
 
             final Path hostMountContainerAppMetricsFolder = hostMountTimeFolder.resolve(SimAppUtils.APP_METRICS_FOLDER);
 
-            final Path hostMountContainerInstanceDataFolder = hostMountTimeFolder.resolve(HOST_CONTAINER_DATA_LOCATION);
+            final Path hostMountContainerInstanceDataFolder = hostMountTimeFolder
+                    .resolve(SimAppUtils.HOST_CONTAINER_DATA_LOCATION);
 
             // add mount mappings
 
@@ -511,48 +574,47 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             try {
                 Files.createDirectories(hostServiceDataFolder);
             } catch (final IOException e) {
-                LOGGER.warn("Unable to create mounted host directory for service '{}': {}", service,
+                LOGGER.error("Unable to create mounted host directory for service '{}': {}", service,
                         hostServiceDataFolder, e);
+                return null;
             }
-            if (Files.exists(hostServiceDataFolder)) {
-                mountMappings.put(hostServiceDataFolder.toAbsolutePath().toString(), CONTAINER_SERVICE_DATA_LOCATION);
+            mountMappings.put(hostServiceDataFolder.toAbsolutePath().toString(), CONTAINER_SERVICE_DATA_LOCATION);
 
-                LOGGER.debug("Adding mounted host directory for service '{}' to container '{}': {}", service,
-                        containerId, hostServiceDataFolder);
-            }
+            LOGGER.debug("Adding mounted host directory for service '{}' to container '{}': {}", service, containerId,
+                    hostServiceDataFolder);
 
             try {
                 Files.createDirectories(hostMountContainerAppMetricsFolder);
             } catch (final IOException e) {
-                LOGGER.warn("Unable to create mounted host directory for service '{}': {}", service,
+                LOGGER.error("Unable to create mounted host directory for service '{}': {}", service,
                         hostMountContainerAppMetricsFolder, e);
+                return null;
             }
-            if (Files.exists(hostMountContainerAppMetricsFolder)) {
-                mountMappings.put(hostMountContainerAppMetricsFolder.toAbsolutePath().toString(),
-                        SimAppUtils.CONTAINER_APP_METRICS_PATH.toAbsolutePath().toString());
-                LOGGER.debug("Adding mounted host directory for service '{}' to container '{}': {}", service,
-                        containerId, hostMountContainerAppMetricsFolder);
-            }
+            mountMappings.put(hostMountContainerAppMetricsFolder.toAbsolutePath().toString(),
+                    SimAppUtils.CONTAINER_APP_METRICS_PATH.toAbsolutePath().toString());
+            LOGGER.debug("Adding mounted host directory for service '{}' to container '{}': {}", service, containerId,
+                    hostMountContainerAppMetricsFolder);
 
             try {
                 Files.createDirectories(hostMountContainerInstanceDataFolder);
             } catch (final IOException e) {
-                LOGGER.warn("Unable to create mounted host directory for service '{}': {}", service,
+                LOGGER.error("Unable to create mounted host directory for service '{}': {}", service,
                         hostMountContainerInstanceDataFolder, e);
+                return null;
             }
-            if (Files.exists(hostMountContainerInstanceDataFolder)) {
-                mountMappings.put(hostMountContainerInstanceDataFolder.toAbsolutePath().toString(),
-                        CONTAINER_DATA_TARGET_LOCATION);
-                LOGGER.debug("Adding mounted host directory for service '{}' to container '{}': {}", service,
-                        containerId, hostMountContainerInstanceDataFolder);
-            }
+            mountMappings.put(hostMountContainerInstanceDataFolder.toAbsolutePath().toString(),
+                    CONTAINER_DATA_TARGET_LOCATION);
+            LOGGER.debug("Adding mounted host directory for service '{}' to container '{}': {}", service, containerId,
+                    hostMountContainerInstanceDataFolder);
+
+            writeContainerInstanceData(hostMountContainerInstanceDataFolder, service);
 
             writeContainerMetadata(hostMountTimeFolder, service, parameters);
 
             // attempt to run Docker container
             final String dockerImage = getImageForService(service);
             final boolean runResult = runDockerContainer(containerName, dockerImage, cpus, memory,
-                    DEFAULT_DOCKER_SHARED_NETWORK_NAME, containerIP, mountMappings);
+                    DEFAULT_DOCKER_SHARED_NETWORK_NAME, containerAddress.getHostAddress(), mountMappings);
 
             // keep track of how many CPUs we've allocated
             allocatedCpus.put(containerId, cpus);
@@ -595,12 +657,11 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             }
 
             final MapContainer container = new MapContainer(this, service, containerId, nicName, genericNetworkCapacity,
-                    ImmutableMap.copyOf(mountMappings), containerAddress, containerInterface, hostMountTimeFolder,
-                    hostMountContainerAppMetricsFolder);
+                    ImmutableMap.copyOf(mountMappings), containerInterface, hostMountTimeFolder, hostMountContainerAppMetricsFolder);
 
             runningContainers.put(containerId, container);
 
-            if (resourceReportTimer != null) {
+            if (updateResourceReportsThread != null) {
                 container.start();
             }
 
@@ -612,10 +673,45 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             return containerId;
         } else {
             LOGGER.error("Failed to start container because there are no more available container IDs.");
-            // NodeIdentifier containerId = new
-            // StringNodeIdentifier(containerName);
             return null;
         }
+    }
+
+    private void writeContainerInstanceData(final Path hostMountContainerInstanceDataFolder,
+            final ServiceIdentifier<?> service) {
+        final ObjectMapper jsonWriter = JsonUtils.getStandardMapObjectMapper();
+
+        try (Writer writer = Files
+                .newBufferedWriter(hostMountContainerInstanceDataFolder.resolve(SimAppUtils.SERVICE_FILENAME))) {
+            jsonWriter.writeValue(writer, service);
+        } catch (final IOException e) {
+            LOGGER.error("Error writing container service information", e);
+        }
+
+        if (Files.exists(this.serviceConfigurationFile)) {
+            try {
+                Files.copy(this.serviceConfigurationFile,
+                        hostMountContainerInstanceDataFolder.resolve(Simulation.SERVICE_CONFIGURATIONS_FILENAME));
+            } catch (final IOException e) {
+                LOGGER.error("Error writing service configurations file", e);
+            }
+        } else {
+            LOGGER.warn("Service configuration file {} does not exist, not copying to container",
+                    this.serviceConfigurationFile);
+        }
+
+        if (Files.exists(this.serviceDependencyFile)) {
+            try {
+                Files.copy(this.serviceDependencyFile,
+                        hostMountContainerInstanceDataFolder.resolve(Simulation.SERVICE_DEPENDENCIES_FILENAME));
+            } catch (final IOException e) {
+                LOGGER.error("Error writing service dependencies file", e);
+            }
+        } else {
+            LOGGER.warn("Service dependency file {} does not exist, not copying to container",
+                    this.serviceDependencyFile);
+        }
+
     }
 
     private static final int VIRTUAL_INTERFACE_RETRY_LIMIT = 10;
@@ -666,7 +762,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             final ContainerParameters parameters) {
         final ObjectMapper jsonWriter = JsonUtils.getStandardMapObjectMapper();
 
-        try (Writer writer = Files.newBufferedWriter(hostMountTimeFolder.resolve("service.json"))) {
+        try (Writer writer = Files.newBufferedWriter(hostMountTimeFolder.resolve(SimAppUtils.SERVICE_FILENAME))) {
             jsonWriter.writeValue(writer, service);
         } catch (final IOException e) {
             LOGGER.error("Error writing container service information", e);
@@ -685,27 +781,20 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     }
 
     // returns an available name for a new container
-    private NodeIdentifier getAvailableContainerName() {
+    private Map.Entry<NodeIdentifier, InetAddress> getAvailableContainerName() {
 
-        Set<NodeIdentifier> runningContainerNames = getRunningContainerIDs();
-        final NodeIdentifier nextContainerName = containerNames.stream()
-                .filter(name -> !runningContainerNames.contains(name)).findFirst().orElse(null);
+        final Set<NodeIdentifier> runningContainerNames = getRunningContainerIDs();
+        final Map.Entry<NodeIdentifier, InetAddress> nextContainerName = containerNames.entrySet().stream() //
+                .filter(entry -> !runningContainerNames.contains(entry.getKey())) //
+                .findFirst().orElse(null);
 
-        LOGGER.info("Available container names: \n" + containerNames + "\nRunning container names: "
-                + runningContainerNames + "\nNext container name: " + nextContainerName);
+        LOGGER.info("Available container names: {} Running container names: {} Next container name: {}", containerNames,
+                runningContainerNames, nextContainerName);
 
         return nextContainerName;
     }
 
     private Map<NodeIdentifier, Double> allocatedCpus = new ConcurrentHashMap<>();
-
-    /**
-     * 
-     * @return the list of all possible container names
-     */
-    public ImmutableList<NodeIdentifier> getContainerNames() {
-        return containerNames;
-    }
 
     private Set<NodeIdentifier> getRunningContainerIDs() {
         return containerResourceMonitor.getMonitoredContainerIDs();
@@ -905,7 +994,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
 
                     return startExecInstanceResponse.getResponseString();
                 } catch (final JsonProcessingException e) {
-                    LOGGER.error("Failed to parse create exec response for container '{}': {}\n{}", containerId,
+                    LOGGER.error("Failed to parse create exec response for container '{}': {}", containerId,
                             createExecResponse.getResponseString(), e);
                 }
             } else {
@@ -1064,10 +1153,9 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                 }
             } catch (final JsonProcessingException e) {
                 LOGGER.error(
-                        "Error parsing JSON response for the attempt to create a container. Response had error code "
-                                + containerCreateResponse.getCode() + " and JSON:\n"
-                                + containerCreateResponse.getResponseString(),
-                        e);
+                        "Error parsing JSON response for the attempt to create a container. "
+                                + "Response had error code {} and JSON: {}",
+                        containerCreateResponse.getCode(), containerCreateResponse.getResponseString(), e);
                 return false;
             }
         } catch (final IOException e) {
@@ -1217,6 +1305,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         }
     }
 
+    private final Map<String, InterfaceIdentifier> interfaceIdentifiers = new HashMap<>();
+
     /**
      * Package visibility for testing. This allows me to force the creation of
      * the latest ResourceReports.
@@ -1237,7 +1327,10 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                     LOGGER.trace("Updating resource reports time: {}", now);
                 }
 
-                final Map<String, InterfaceIdentifier> interfaceIdentfiers = createInterfaceIdentifiers();
+                synchronized (interfaceIdentifiers) {
+                    interfaceIdentifiers.clear();
+                    interfaceIdentifiers.putAll(createInterfaceIdentifiers());
+                }
 
                 final Map<NodeAttribute, Double> allocatedComputeCapacity = getAllocatedComputeCapacity();
 
@@ -1270,17 +1363,17 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                 // compute network information
                 final Set<NodeIdentifier> connectedNeighbors = node.getConnectedNeighbors();
                 final ImmutableMap<InterfaceIdentifier, ImmutableMap<LinkAttribute, Double>> reportNetworkCapacity = getNetworkCapacities(
-                        interfaceIdentfiers, connectedNeighbors);
+                        interfaceIdentifiers, connectedNeighbors);
                 LOGGER.trace("Network capacities: {}", reportNetworkCapacity);
 
                 final Map<String, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoadPerNic = ncpResourceMonitor
                         .computeNetworkLoadPerNic(getNode());
                 final Map<InterfaceIdentifier, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoadPerInterface = new HashMap<>();
                 networkLoadPerNic.forEach((nic, data) -> {
-                    final InterfaceIdentifier ii = interfaceIdentfiers.get(nic);
+                    final InterfaceIdentifier ii = interfaceIdentifiers.get(nic);
                     if (null == ii) {
                         LOGGER.warn("Interface {} found in network load NICs, but not found in interfaces map {}", nic,
-                                interfaceIdentfiers);
+                                interfaceIdentifiers);
                     } else {
                         networkLoadPerInterface.put(ii, data);
                     }
@@ -1291,10 +1384,10 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                 networkDemandTracker.updateDemandValues(now, reportNetworkLoad);
 
                 final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportShortNetworkDemand = networkDemandTracker
-                        .computeNetworkDemand(now, ResourceReport.EstimationWindow.SHORT);
+                        .computeNetworkDemand(ResourceReport.EstimationWindow.SHORT);
 
                 final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportLongNetworkDemand = networkDemandTracker
-                        .computeNetworkDemand(now, ResourceReport.EstimationWindow.LONG);
+                        .computeNetworkDemand(ResourceReport.EstimationWindow.LONG);
 
                 final boolean skipNetworkData = AgentConfiguration.getInstance().getSkipNetworkData();
 
@@ -1342,65 +1435,6 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             LOGGER.error("Error converting resource report to string", e);
             return "ERROR";
         }
-    }
-
-    private String resourceReportImmutableMapToString(String label, int indentLevel, ImmutableMap<?, ?> reportMap) {
-        StringBuilder b = new StringBuilder();
-
-        for (int i = 0; i < indentLevel; i++)
-            b.append("   ");
-
-        b.append(label + "\n");
-
-        reportMap.forEach((key, value) -> {
-
-            if (value instanceof ImmutableMap<?, ?>) {
-                ImmutableMap<?, ?> subMap = (ImmutableMap<?, ?>) value;
-
-                if (key instanceof NodeIdentifier) {
-                    NodeIdentifier nodeId = (NodeIdentifier) key;
-                    b.append(resourceReportImmutableMapToString("Node ID: " + nodeId.getName(), indentLevel + 1,
-                            subMap));
-                } else if (key instanceof ServiceIdentifier) {
-                    ServiceIdentifier<?> serviceId = (ServiceIdentifier<?>) key;
-                    b.append(resourceReportImmutableMapToString("Service ID: " + serviceId.getIdentifier(),
-                            indentLevel + 1, subMap));
-                } else if (key instanceof RegionIdentifier) {
-                    RegionIdentifier regionId = (RegionIdentifier) key;
-                    b.append(resourceReportImmutableMapToString("Region ID: " + regionId.getName(), indentLevel + 1,
-                            subMap));
-                } else if (key instanceof NodeIdentifier) {
-                    NodeIdentifier containerId = (NodeIdentifier) key;
-                    b.append(resourceReportImmutableMapToString("Container ID: " + containerId.getName(),
-                            indentLevel + 1, subMap));
-                } else {
-                    b.append("[unknown key type for value of type ImmutableMap]");
-                    b.append("\n");
-                }
-            } else {
-                for (int i = 0; i < indentLevel + 1; i++)
-                    b.append("   ");
-
-                if (key instanceof ServiceIdentifier<?>) {
-                    ServiceIdentifier<?> serviceId = (ServiceIdentifier<?>) key;
-                    b.append("Service '" + serviceId + "': " + (Double) value);
-                    b.append("\n");
-                } else if (key instanceof LinkAttribute) {
-                    LinkAttribute attr = (LinkAttribute) key;
-                    b.append(attr + ": " + (Double) value);
-                    b.append("\n");
-                } else if (key instanceof NodeAttribute) {
-                    NodeAttribute attr = (NodeAttribute) key;
-                    b.append(attr + ": " + (Double) value);
-                    b.append("\n");
-                } else {
-                    b.append("[unknown key type]");
-                    b.append("\n");
-                }
-            }
-        });
-
-        return b.toString();
     }
 
     @Override
@@ -1504,6 +1538,23 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
     }
 
     /**
+     * 
+     * @param nic
+     *            the network interface to query
+     * @return the speed or 0 if not found in {@link #ipToDelay}
+     */
+    private double getTopologyLinkDelayForNetworkInterface(final NetworkInterface nic) {
+        for (final InterfaceAddress addr : nic.getInterfaceAddresses()) {
+            final InetAddress a = addr.getAddress();
+            final String nicIp = a.getHostAddress();
+            if (ipToDelay.containsKey(nicIp)) {
+                return ipToDelay.get(nicIp);
+            }
+        }
+        return 0;
+    }
+
+    /**
      * Network bandwidth for the specified NIC from the topology.
      * 
      * @param nic
@@ -1535,8 +1586,46 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             }
             return Double.POSITIVE_INFINITY;
         } catch (final SocketException e) {
-            LOGGER.warn("Unable to enumerate network interfaces when getting topology bandwidth, return Infinity", e);
+            LOGGER.warn("Unable to enumerate network interfaces when getting topology bandwidth, returning Infinity",
+                    e);
             return Double.POSITIVE_INFINITY;
+        }
+    }
+
+    /**
+     * Link delay for the specified NIC from the topology.
+     * 
+     * @param nic
+     *            the network interface to check
+     * @return the value from the topology or {@link Double#POSITIVE_INFINITY}
+     *         if nothing is specified in the topology
+     */
+    private double getTopologyLinkDelay(final String nic) {
+        try {
+            final Enumeration<NetworkInterface> nicEnum = NetworkInterface.getNetworkInterfaces();
+            while (nicEnum.hasMoreElements()) {
+                final NetworkInterface n = nicEnum.nextElement();
+                if (n.getName().equals(nic)) {
+                    final double bw = getTopologyLinkDelayForNetworkInterface(n);
+                    if (!Double.isNaN(bw)) {
+                        return bw;
+                    }
+
+                    // check bridge
+                    final NetworkInterface bridge = ncpResourceMonitor.getBridgeNameforNIC(n);
+                    if (null != bridge) {
+                        final double bbw = getTopologyLinkDelayForNetworkInterface(bridge);
+                        if (!Double.isNaN(bbw)) {
+                            return bbw;
+                        }
+                    }
+
+                }
+            }
+            return 0;
+        } catch (final SocketException e) {
+            LOGGER.warn("Unable to enumerate network interfaces when getting topology link delay, returning 0", e);
+            return 0;
         }
     }
 
@@ -1553,14 +1642,18 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             final double hardwareBandwidth = ncpResourceMonitor.getNetworkBandwidth(nic);
             final double topologyBandwidth = getTopologyBandwidth(nic);
             final double bandwidth = Math.min(hardwareBandwidth, topologyBandwidth);
-            LOGGER.debug("getNetworkCapacities: hw bandwidth: {} topology bandwidth: {} bandwidth: {}",
-                    hardwareBandwidth, topologyBandwidth, bandwidth);
+            final double linkDelay = getTopologyLinkDelay(nic);
+
+            LOGGER.debug("getNetworkCapacities: hw bandwidth: {} topology bandwidth: {} bandwidth: {} delay: {}",
+                    hardwareBandwidth, topologyBandwidth, bandwidth, linkDelay);
 
             final ImmutableMap.Builder<LinkAttribute, Double> linkCapacity = ImmutableMap.builder();
 
             // add nic bandwidth
             linkCapacity.put(LinkAttribute.DATARATE_TX, bandwidth);
             linkCapacity.put(LinkAttribute.DATARATE_RX, bandwidth);
+
+            linkCapacity.put(LinkAttribute.DELAY, linkDelay);
 
             LOGGER.debug("getNetworkCapacities: Add capacity for NIC {} with bandwidth {}", nic, bandwidth);
             networkCapacity.put(ii, linkCapacity.build());
@@ -1576,6 +1669,36 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
      */
     public NCPResourceMonitor getNCPResourceMonitor() {
         return ncpResourceMonitor;
+    }
+
+    /**
+     * Given a network interface name, convert it to the network interface name
+     * that will show up as a key in {@link #interfaceIdentifiers}.
+     * 
+     * @param nic
+     *            the network interface to lookup
+     * @return the network interface to use, not null
+     */
+    private String getPhysicalNic(final String nic) {
+
+        // if nicName refers to a bridge, replace nicName with the the
+        // first physical interface name
+        final Set<String> physicalNicNames = ncpResourceMonitor.getPysicalNICNamesForBridge(nic);
+
+        final String physicalNicName;
+        if (physicalNicNames == null || physicalNicNames.isEmpty()) {
+            physicalNicName = nic;
+            LOGGER.debug("{} is a physical interface.", nic);
+        } else {
+            if (physicalNicNames.size() > 1)
+                LOGGER.warn("There is more than one physical interface ({}) for bridge {}.", physicalNicNames, nic);
+
+            physicalNicName = physicalNicNames.iterator().next();
+            LOGGER.debug("Selected physical interface {} from set {} for bridge {}.", physicalNicName, physicalNicNames,
+                    nic);
+        }
+
+        return physicalNicName;
     }
 
     /**
@@ -1599,30 +1722,14 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         neighbors.forEach(neighbor -> {
             try {
                 // reverse DNS lookup of neighbor's domain name
-                final InetAddress neighborAddr = Address.getByName(neighbor.getName());
+                final InetAddress neighborAddr = DnsUtils.getByName(neighbor.getName());
                 final String nicName = table.route(neighborAddr);
 
-                // if nicName refers to a bridge, replace nicName with the the
-                // first physical interface name
-                final Set<String> physicalNicNames = ncpResourceMonitor.getPysicalNICNamesForBridge(nicName);
+                final String physicalNicName = getPhysicalNic(nicName);
 
-                final String physicalNicName;
-                if (physicalNicNames == null || physicalNicNames.isEmpty()) {
-                    physicalNicName = nicName;
-                    LOGGER.debug("{} is a physical interface.", nicName);
-                } else {
-                    if (physicalNicNames.size() > 1)
-                        LOGGER.warn("There is more than one physical interface ({}) for bridge {}.", physicalNicNames,
-                                nicName);
-
-                    physicalNicName = physicalNicNames.iterator().next();
-                    LOGGER.debug("Selected physical interface {} from set {} for bridge {}.", physicalNicName,
-                            physicalNicNames, nicName);
-                }
-
-                if (nicName != null) {
+                if (physicalNicName != null) {
                     nicToNeighbor.computeIfAbsent(physicalNicName, k -> new HashSet<>()).add(neighbor);
-                    LOGGER.debug("createNeighborToNICMap: Mapped neighbor to NIC: {} -> {}", neighbor, nicName);
+                    LOGGER.debug("createNeighborToNICMap: Mapped neighbor to NIC: {} -> {}", neighbor, physicalNicName);
                 } else {
                     LOGGER.warn("createNeighborToNICMap: Failed to map neighbor '{}' to NIC.", neighbor);
                 }
@@ -1649,7 +1756,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             LOGGER.info(
                     "--------------------------------- Running container shutdown hook. -----------------------------------");
 
-            containerNames.forEach((id) -> {
+            containerNames.forEach((id, addr) -> {
                 LOGGER.info("--------- Shutdown hook: running stopService({}) ---------", id);
                 stopService(id);
             });
@@ -1678,4 +1785,103 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         }
     }
 
+    /**
+     * 
+     * @return the set of images currently loaded on this node
+     */
+    @Nonnull
+    /* package */ static Set<String> getCurrentImages() {
+
+        final Set<String> images = new HashSet<>();
+
+        try {
+            // request to create an image (by pulling)
+            final Response response = request("/images/json", HTTP_GET, null);
+            LOGGER.debug("List images response " + response.getCode() + ": " + response.getResponseString());
+
+            if (response.getCode() == DOCKER_RESPONSE_CODE_LIST_IMAGES) {
+                final ObjectMapper jsonParser = JsonUtils.getStandardMapObjectMapper();
+                try {
+                    final JsonNode parsed = jsonParser.readTree(response.getResponseString());
+                    for (final JsonNode imageEntry : parsed) {
+                        final JsonNode repoTags = imageEntry.get("RepoTags");
+                        for (final JsonNode imageNode : repoTags) {
+                            final String image = imageNode.asText();
+                            images.add(image);
+
+                            // strip off the tag
+                            final int colonIndex = image.lastIndexOf(':');
+                            if (colonIndex > 0) {
+                                final String imageNoTag = image.substring(0, colonIndex);
+                                images.add(imageNoTag);
+                            }
+                        }
+                    }
+                } catch (final JsonProcessingException e) {
+                    LOGGER.error("Failed to parse response from image listing: {}", response.getResponseString(), e);
+                }
+            } else {
+                LOGGER.error("Failed to list images (response code " + response.getCode() + ")");
+            }
+        } catch (final IOException e) {
+            LOGGER.warn("Error listing docker images", e);
+        }
+
+        return images;
+    }
+
+    @Override
+    public void addFailedRequest(final NodeIdentifier client,
+            final NodeIdentifier containerId,
+            final long serverEndTime,
+            final Map<NodeAttribute, Double> serverLoad,
+            final long networkEndTime,
+            final Map<LinkAttribute, Double> networkLoad) {
+
+        LOGGER.debug(
+                "addFailedRequest: client: {}, containerId: {}, serverEndTime: {}, serverLoad: {}, "
+                        + "networkEndTime: {}, networkLoad: {}, useFailedRequestsInDemand = {}",
+                client, containerId, serverEndTime, serverLoad, networkEndTime, networkLoad, useFailedRequestsInDemand);
+
+        if (useFailedRequestsInDemand) {
+            final MapContainer container = runningContainers.get(containerId);
+            if (null == container) {
+                LOGGER.warn("Looking for container {} to notify of failed request, but it's not running", containerId);
+                return;
+            }
+
+            try {
+                container.addFailedRequest(client, serverEndTime, serverLoad, networkEndTime, networkLoad);
+
+                final InetAddress clientAddress = DnsUtils.getByName(client.getName());
+                final String nic = ncpResourceMonitor.getRoutingTable().route(clientAddress.getHostAddress());
+                final String physicalNic = getPhysicalNic(nic);
+
+                if (null == physicalNic) {
+                    LOGGER.error("Cannot find network interface for connection to {}, ignoring failed request", client);
+                    return;
+                }
+
+                final InterfaceIdentifier ifce;
+                synchronized (interfaceIdentifiers) {
+                    if (interfaceIdentifiers.isEmpty()) {
+                        // ensure the interface identifiers have been updated
+                        interfaceIdentifiers.clear();
+                        interfaceIdentifiers.putAll(createInterfaceIdentifiers());
+                    }
+
+                    if (!interfaceIdentifiers.containsKey(physicalNic)) {
+                        LOGGER.error("Unable to find interface for nic {}, ignoring failed request", physicalNic);
+                        return;
+                    }
+                    ifce = interfaceIdentifiers.get(physicalNic);
+                }
+
+                networkDemandTracker.addFailedRequest(ifce, client, containerId, container.getService(), networkEndTime,
+                        networkLoad);
+            } catch (UnknownHostException e) {
+                LOGGER.error("Cannot find address for client {}, ignoring failed request", client, e);
+            }
+        }
+    }
 }

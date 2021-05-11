@@ -1,0 +1,7 @@
+- hosts: clients
+  become: yes
+  tasks:
+    - name: Copy Flink traces (Emulab)
+      ansible.posix.synchronize:
+        src: /proj/a3/map/flink/
+        dest: /var/lib/map/client/flink

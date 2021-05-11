@@ -2,7 +2,8 @@
 - hosts: all
   become: yes
   tasks:
-    - name: start service
+    - name: stop sysinfo service
       systemd:
         name: map_system_stats
         state: stopped
+        enabled: no

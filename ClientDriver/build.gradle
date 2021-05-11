@@ -36,7 +36,6 @@ configurations {
 
 dependencies {
     api project(':hifi-resmgr')
-    api project(':fake-load-server')
 
     api group: 'commons-cli', name: 'commons-cli', version: props.getProperty("commons_cli_version")
     

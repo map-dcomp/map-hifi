@@ -84,3 +84,25 @@
         dest: /etc/map
         owner: root
         mode: 0755
+    - name: "Copy DCOP leaders file"
+      copy:
+        src: dcop_leaders.txt
+        dest: /etc/map
+        owner: root
+        mode: 0664
+    - name: "Copy hosts to cache file"
+      copy:
+        src: hosts_to_cache.txt
+        dest: /etc/map
+        owner: root
+        mode: 0664
+        
+    - name: install packages for NCPs
+      apt:
+        name: 
+          - libatlas3-base
+          - libgfortran4
+          - python3-requests
+      register: result
+      until: result is not failed
+      retries: 10

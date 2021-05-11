@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -53,11 +53,11 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.util.IOUtils;
-import org.xbill.DNS.Address;
 
 import com.bbn.map.hifi.apps.filestore.protocol.Acknowledgement;
 import com.bbn.map.hifi.apps.filestore.protocol.FileStoreOperation;
 import com.bbn.map.hifi.apps.filestore.server.FileStore;
+import com.bbn.map.hifi.util.DnsUtils;
 
 /**
  * Servlet to store a request in a database.
@@ -147,7 +147,7 @@ public class DatabaseServlet extends HttpServlet {
 
             // send the contents of the request to the database
             try {
-                InetAddress databaseAddress = Address.getByName(DATABASE_HOSTNAME);
+                InetAddress databaseAddress = DnsUtils.getByName(DATABASE_HOSTNAME);
                 storeInDatabase(databaseAddress, bodyContent);
             } catch (UnknownHostException e) {
                 LOGGER.error("Could not find node with hostname '{}'.", DATABASE_HOSTNAME, e);

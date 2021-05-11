@@ -33,19 +33,25 @@ pipeline {
                           recordIssues \
                               filters: [excludePackage('com.bbn.map.hifi.apps.filestore.*'), \
                                         excludePackage('com.bbn.map.FaceRecognition.*'),
-                                        excludePackage('com.bbn.map.TestingHarness.*')], \
+                                        excludePackage('com.bbn.map.TestingHarness.*'),
+					excludeFile('MAP-code/*')], \
                               qualityGates: [[threshold: 1, type: 'TOTAL', unstable: true]], \
                               tools: [spotBugs(pattern: '**/build/reports/spotbugs/*.xml'), checkStyle(pattern: '**/build/reports/checkstyle/*.xml')]
 
-                          junit testResults: "**/build/test-results/**/*.xml", keepLongStdio: true
+                          junit testResults: "**/build/test-results/**/*.xml", keepLongStdio: false
 
-                          recordIssues tool: taskScanner(excludePattern: 'gradle-repo/**,maven-repo/**', includePattern: '**/*.java,**/*.sh,**/*.py', highTags: 'FIXME,HACK', normalTags: 'TODO')
+                          recordIssues tool: taskScanner(excludePattern: 'gradle-repo/**,maven-repo/**,MAP-code/**', includePattern: '**/*.java,**/*.sh,**/*.py', highTags: 'FIXME,HACK', normalTags: 'TODO')
       
                           recordIssues tool: java()
 
                         }
                 }
 
+		stage('Archive artifacts') {
+		        steps {
+			    archiveArtifacts artifacts: '**/*.log,**/build/reports/**,**/build/test-results/**'
+			}
+		}
 
         } // stages
                 

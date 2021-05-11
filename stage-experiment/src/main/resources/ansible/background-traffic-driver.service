@@ -11,6 +11,7 @@ SuccessExitStatus=0
 Restart=on-failure
 RestartSec=5s
 OOMScoreAdjust=-1000
+TasksMax=infinity
 
 [Install]
 WantedBy=default.target

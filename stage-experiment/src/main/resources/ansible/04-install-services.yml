@@ -38,7 +38,7 @@
     - name: reload systemd
       systemd:
         daemon_reload: yes
-    - name: reload docker
+    - name: restart docker
       systemd:
         name: docker
         state: restarted
@@ -55,7 +55,20 @@
     - name: reload systemd
       systemd:
         daemon_reload: yes
-      
+
+- hosts: agent_profile
+  become: yes
+  tasks:
+    - name: install agent systemd script
+      copy:
+        src: map-agent.profile.service
+        dest: /etc/systemd/system/map-agent.service
+        owner: root
+        mode: 0664
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+        
 - hosts: clients
   become: yes
   tasks:

@@ -51,6 +51,7 @@ ext['log4j2.version'] = '2.8.2'
 dependencies {
     implementation project(':MAP-Agent')
     implementation project(':hifi-utils')
+    implementation project(':ClientDriver')
 
     implementation group: 'org.eclipse.jetty', name: 'jetty-server', version: jetty_version
     implementation group: 'org.eclipse.jetty', name: 'jetty-io', version: jetty_version

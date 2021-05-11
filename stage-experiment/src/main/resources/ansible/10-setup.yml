@@ -19,10 +19,10 @@
         name: map
         groups: root,sudo
         append: yes
-    - name: copy excluded subnets file
+    - name: copy testbed subnets file
       copy:
-        src: excluded-subnets.txt
-        dest: /etc/map/excluded-subnets.txt
+        src: testbed-control-subnets.txt
+        dest: /etc/map/testbed-control-subnets.txt
         owner: root
         group: root
         mode: 0444       
@@ -65,11 +65,8 @@
         mode: 0444
     - name: install background traffic packages
       apt:
-        update_cache: yes
-        name: "{{ packages }}"
-      vars:
-        packages:
-        - iperf3
+        name:
+          - iperf3
     - name: copy global properties file
       copy:
         src: global.properties
@@ -106,15 +103,3 @@
         owner: root
         group: root
         mode: 0444
-        
-    - name: install daemon.json for docker
-      copy:
-        src: daemon.json
-        dest: /etc/docker/daemon.json
-        owner: root
-        group: root
-        mode: 0444
-    - name: restart docker
-      systemd:
-        name: docker
-        state: restarted

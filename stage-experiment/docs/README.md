@@ -2,7 +2,9 @@ The `StageExperiment` tool is used to create files to be pushed out to emulab us
 
 All filenames must match the case of the node name in topoolgy.ns.
 
-See `run.sh` that creates the ansible files to run 2-ncp-2-client in the emulab experiment jps as part of the a3 project. See the help documentation on `StageExperiment` for more information on the parameters. Note that you will need to modify the docker registry node.
+See `run.sh` that creates the ansible files to run 2-ncp-2-client in the emulab experiment jps as part of the a3 project. 
+See the help documentation on `StageExperiment` for more information on the parameters. Note that you will need to modify the docker registry node.
+Many of the scenarios in `MAP-code/scenarios` have a `stage.sh` script that takes care of setting all of the correct parameters.
 
 The container names directory contains a file for each NCP.  The file
 contains an IP address per line.  This specifies the IP addresses for the
@@ -21,7 +23,7 @@ For running on the DCOMP testbed copy the generated directory to the XDC
 and execute `run-scenario_dcomp.sh`.
 
 There is an option to the run scenario scripts, "--auto-swap", that will
-swap out the Emulab experiment once the scenario has finished.
+swap out the experiment once the scenario has finished.
 
 
 To run an experiment in batch mode (only on emulab)
@@ -37,7 +39,8 @@ how the agent configuration is specified.
 Dynamic routing
 ==============
 
-If you want to enable dynamic routing for testing link failures, set the `rtProto` value in `topology.ns` to `Manual`.
+All experiments use dynamic routing at this point. This uses Quagga OSPF to compute routes.
+
 
 Starting clients
 ===============

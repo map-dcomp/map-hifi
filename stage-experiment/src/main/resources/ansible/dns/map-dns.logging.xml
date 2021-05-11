@@ -36,7 +36,6 @@
  
         <!-- end stuff for debugging -->
 
-    <Logger name="com.bbn.map.dcop.DCOPService" level="TRACE"/>
           <Logger name="com.bbn" level="INFO" />
 
         <Root level="WARN">

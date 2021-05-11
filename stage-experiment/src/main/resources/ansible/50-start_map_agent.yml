@@ -2,9 +2,8 @@
 - hosts: ncps
   become: yes
   tasks:
-    - name: start service
+    - name: start MAP agent service
       systemd:
         name: map-agent
         state: started
         enabled: yes
-        daemon-reload: yes

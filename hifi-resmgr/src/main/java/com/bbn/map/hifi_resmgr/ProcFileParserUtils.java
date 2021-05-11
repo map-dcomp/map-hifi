@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -132,32 +132,6 @@ public final class ProcFileParserUtils
     public static String[] splitByWhiteSpace(String str)
     {
         return str.split("\\s+");
-    }
-
-    /**
-     * Split a string into substrings with | optionally surrounding by whitespace as
-     * the delimiter.
-     * 
-     * @param str
-     *            the string to split
-     * @return the resulting array of strings after the split
-     */
-    public static String[] splitByPipe(String str)
-    {
-        return str.split("\\s*\\|\\s*");
-    }
-
-    /**
-     * Split a string into substrings with : optionally surrounded with whitespace
-     * as the delimiter.
-     * 
-     * @param str
-     *            the string to split
-     * @return the resulting array of strings after the split
-     */
-    public static String[] splitByColon(String str)
-    {
-        return str.split("\\s*:\\s*");
     }
 
     /**

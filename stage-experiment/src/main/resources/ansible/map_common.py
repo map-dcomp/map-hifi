@@ -1,5 +1,5 @@
 #BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-# Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+# Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 # To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 # the exception of the dcop implementation identified below (see notes).
 # 
@@ -80,7 +80,7 @@ def load_excluded_subnets():
     """
     
     control_networks = list()
-    with open('/etc/map/excluded-subnets.txt') as f:
+    with open('/etc/map/testbed-control-subnets.txt') as f:
         for line in f:
             subnet = ipaddress.ip_network(line.strip())
             control_networks.append(subnet)

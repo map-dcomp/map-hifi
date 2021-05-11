@@ -1,0 +1,8 @@
+---
+- import_playbook: stop_sim-driver.yml
+- import_playbook: stop_map_agent.yml
+- import_playbook: flow-stop.yml
+  when: collect_flow_data == "1"
+- import_playbook: stop_background_traffic.yml
+- import_playbook: sysinfo/stop.yml
+- import_playbook: 90-gather-node-data.yml

@@ -26,11 +26,9 @@
         mode: u=rwx,g=rx,o=rx
         owner: map       
     - name: Install scenario
-      copy:
+      ansible.posix.synchronize:
         src: sim-driver/scenario/
         dest: /var/lib/map/sim-driver/scenario/
-        owner: map
-        mode: 0444
     - name: Install agent configuration
       copy:
         src: agent-configuration.json

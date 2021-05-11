@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -137,12 +137,13 @@ public class TestSubnetBlock {
             }
         }
 
+        final int numContainers = 4;
         final Set<InetAddress> seenNcp = new HashSet<>();
         final Set<InetAddress> seenContainer = new HashSet<>();
         done = false;
         while (!done) {
             try {
-                final Pair<InetAddress, List<InetAddress>> pair = block.getNcpAddress(SubnetBlock.MAX_CONTAINERS_PER_NCP);
+                final Pair<InetAddress, List<InetAddress>> pair = block.getNcpAddress(numContainers);
                 final InetAddress ncpAddr = pair.getLeft();
                 final boolean ncpAdded = seenNcp.add(ncpAddr);
                 assertThat("Found NCP address " + ncpAddr + " that overlaps an NCP address previously seen", true,

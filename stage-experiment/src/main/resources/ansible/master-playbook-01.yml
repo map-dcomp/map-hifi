@@ -1,0 +1,8 @@
+---
+- import_playbook: 01-ansible-packages.yml
+- import_playbook: 02-base-networking.yml
+- import_playbook: 02-failsafe-dns_{{testbed}}.yml
+- import_playbook: stop-quagga.yml
+- import_playbook: 04-install-services.yml
+- import_playbook: stop_clients.yml
+- import_playbook: stop_map_agent.yml

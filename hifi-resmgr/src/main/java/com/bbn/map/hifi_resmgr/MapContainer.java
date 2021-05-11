@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -31,11 +31,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 BBN_LICENSE_END*/
 package com.bbn.map.hifi_resmgr;
 
-import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.nio.file.Path;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
@@ -45,21 +43,18 @@ import org.apache.logging.log4j.CloseableThreadContext;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import com.bbn.map.AgentConfiguration;
 import com.bbn.map.hifi.util.UnitConversions;
-import com.bbn.map.simulator.NetworkDemandTracker;
+import com.bbn.map.simulator.ComputeDemandTracker;
 import com.bbn.protelis.networkresourcemanagement.ContainerResourceReport;
 import com.bbn.protelis.networkresourcemanagement.InterfaceIdentifier;
 import com.bbn.protelis.networkresourcemanagement.LinkAttribute;
 import com.bbn.protelis.networkresourcemanagement.NetworkServer;
 import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
 import com.bbn.protelis.networkresourcemanagement.NodeIdentifier;
-import com.bbn.protelis.networkresourcemanagement.NodeNetworkFlow;
 import com.bbn.protelis.networkresourcemanagement.RegionIdentifier;
 import com.bbn.protelis.networkresourcemanagement.ResourceReport;
 import com.bbn.protelis.networkresourcemanagement.ServiceIdentifier;
 import com.bbn.protelis.networkresourcemanagement.ServiceStatus;
-import com.bbn.protelis.utils.ImmutableUtils;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;;
 
@@ -77,7 +72,7 @@ public class MapContainer {
     private final Object lock = new Object();
     private ContainerResourceReport shortResourceReport;
     private ContainerResourceReport longResourceReport;
-    private final NetworkDemandTracker networkDemandTracker;
+    private final ComputeDemandTracker computeDemandTracker;
 
     private ContainerResourceStats latestContainerResourceStats;
 
@@ -85,10 +80,10 @@ public class MapContainer {
 
     private final ActiveConnectionCountRetriever activeConnectionCountRetriever;
 
+    private final FailedClientRequestRetriever failedClientRequestRetriever;
+
     private final ImmutableMap<String, String> mountMappings;
 
-    private final IftopProcessor iftopProcessor;
-    private final InetAddress containerAddress;
     private final Path baseOutputPath;
 
     private final String nicName;
@@ -101,12 +96,12 @@ public class MapContainer {
      *            the identifier for the service to run in this container
      * @param containerId
      *            the identifier to use for this container
+     * @param nicName
+     *            the name of the network interface for this container
      * @param networkCapacity
      *            see {@link #getNetworkCapacity()}
      * @param mountMappings
      *            see {@link #getMountMappings()}
-     * @param containerAddress
-     *            the address of the container, used for computing network load
      * @param containerNic
      *            the network interface of the container, used for computing
      *            network load
@@ -114,8 +109,6 @@ public class MapContainer {
      *            see {@link #getBaseOutputPath()}
      * @param hostMountContainerAppMetricsFolder
      *            path to the app metrics folder on the host
-     * @param nicName
-     *            the name of the network interface for this container
      */
     public MapContainer(@Nonnull final SimpleDockerResourceManager parent,
             @Nonnull final ServiceIdentifier<?> serviceId,
@@ -123,7 +116,6 @@ public class MapContainer {
             @Nonnull final String nicName,
             @Nonnull final ImmutableMap<LinkAttribute, Double> networkCapacity,
             @Nonnull final ImmutableMap<String, String> mountMappings,
-            @Nonnull final InetAddress containerAddress,
             @Nonnull final NetworkInterface containerNic,
             @Nonnull final Path baseOutputPath,
             @Nonnull final Path hostMountContainerAppMetricsFolder) {
@@ -133,14 +125,13 @@ public class MapContainer {
         this.parent = parent;
         this.networkCapacity = networkCapacity;
         this.mountMappings = mountMappings;
-        this.containerAddress = containerAddress;
         this.baseOutputPath = baseOutputPath;
 
         this.shortResourceReport = ContainerResourceReport.getNullReport(getIdentifier(),
                 ResourceReport.EstimationWindow.SHORT);
         this.longResourceReport = ContainerResourceReport.getNullReport(getIdentifier(),
                 ResourceReport.EstimationWindow.LONG);
-        this.networkDemandTracker = new NetworkDemandTracker();
+        this.computeDemandTracker = new ComputeDemandTracker();
 
         // initialize resource stats to default value
         this.latestContainerResourceStats = new ContainerResourceStats();
@@ -151,7 +142,8 @@ public class MapContainer {
         this.activeConnectionCountRetriever = new ActiveConnectionCountRetriever(this.identifier,
                 hostMountContainerAppMetricsFolder);
 
-        this.iftopProcessor = new IftopProcessor(containerNic);
+        this.failedClientRequestRetriever = new FailedClientRequestRetriever(parent, this.identifier,
+                hostMountContainerAppMetricsFolder);
 
         LOGGER.info("Constructing container with id " + containerId.getName());
     }
@@ -316,8 +308,7 @@ public class MapContainer {
 
         averageRequestProcessTimeRetriever.start();
         activeConnectionCountRetriever.start();
-
-        iftopProcessor.start();
+        failedClientRequestRetriever.start();
     }
 
     /**
@@ -354,42 +345,22 @@ public class MapContainer {
                     final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> reportComputeLoad = getComputeLoad(
                             allocatedComputeCapacity);
 
-                    final ImmutableMap<InterfaceIdentifier, ImmutableMap<LinkAttribute, Double>> reportNetworkCapacity = getNetworkCapacity();
-
                     // Obtain measured network load
-                    final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportNetworkLoad = getNetworkLoad();
+                    computeDemandTracker.updateComputeDemandValues(now, reportComputeLoad);
 
-                    networkDemandTracker.updateDemandValues(now, reportNetworkLoad);
-
-                    updateComputeDemandValues(now, reportComputeLoad);
-
-                    final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportLongNetworkDemand = networkDemandTracker
-                            .computeNetworkDemand(now, ResourceReport.EstimationWindow.LONG);
-
-                    final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> reportLongServerDemand = computeComputeDemand(
-                            now, ResourceReport.EstimationWindow.LONG);
-
-                    final boolean skipNetworkData = AgentConfiguration.getInstance().getSkipNetworkData();
+                    final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> reportLongServerDemand = computeDemandTracker
+                            .computeComputeDemand(ResourceReport.EstimationWindow.LONG);
 
                     longResourceReport = new ContainerResourceReport(getIdentifier(), now, getService(),
                             getServiceStatus(), ResourceReport.EstimationWindow.LONG, computeCapacity,
-                            reportComputeLoad, reportLongServerDemand, serverAverageProcessTime, //
-                            skipNetworkData ? ImmutableMap.of() : reportNetworkCapacity,
-                            skipNetworkData ? ImmutableMap.of() : reportNetworkLoad,
-                            skipNetworkData ? ImmutableMap.of() : reportLongNetworkDemand);
+                            reportComputeLoad, reportLongServerDemand, serverAverageProcessTime);
 
-                    final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> reportShortServerDemand = computeComputeDemand(
-                            now, ResourceReport.EstimationWindow.SHORT);
-
-                    final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportShortNetworkDemand = networkDemandTracker
-                            .computeNetworkDemand(now, ResourceReport.EstimationWindow.SHORT);
+                    final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> reportShortServerDemand = computeDemandTracker
+                            .computeComputeDemand(ResourceReport.EstimationWindow.SHORT);
 
                     shortResourceReport = new ContainerResourceReport(getIdentifier(), now, getService(),
                             getServiceStatus(), ResourceReport.EstimationWindow.SHORT, computeCapacity,
-                            reportComputeLoad, reportShortServerDemand, serverAverageProcessTime, //
-                            skipNetworkData ? ImmutableMap.of() : reportNetworkCapacity,
-                            skipNetworkData ? ImmutableMap.of() : reportNetworkLoad,
-                            skipNetworkData ? ImmutableMap.of() : reportShortNetworkDemand);
+                            reportComputeLoad, reportShortServerDemand, serverAverageProcessTime);
                 } // end lock
             } // logging thread context
 
@@ -455,57 +426,31 @@ public class MapContainer {
         }
     }
 
-    private ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> computeComputeDemand(final long now,
-            @Nonnull final ResourceReport.EstimationWindow estimationWindow) {
-        final long duration;
-        switch (estimationWindow) {
-        case LONG:
-            duration = AgentConfiguration.getInstance().getDcopEstimationWindow().toMillis();
-            break;
-        case SHORT:
-            duration = AgentConfiguration.getInstance().getRlgEstimationWindow().toMillis();
-            break;
-        default:
-            throw new IllegalArgumentException("Unknown estimation window: " + estimationWindow);
-        }
+    /**
+     * Add to the failed client request information.
+     * 
+     * @param serverEndTime
+     *            expected end time of the server load
+     * @param serverLoad
+     *            server load of the request
+     * @param networkEndTime
+     *            expected end time of the network load
+     * @param networkLoad
+     *            network load of the request
+     * @param client
+     *            the client making the request
+     */
+    public void addFailedRequest(final NodeIdentifier client,
+            final long serverEndTime,
+            final Map<NodeAttribute, Double> serverLoad,
+            final long networkEndTime,
+            final Map<LinkAttribute, Double> networkLoad) {
 
-        final long cutoff = now - duration;
-        final Map<NodeIdentifier, Map<NodeAttribute, Double>> sums = new HashMap<>();
-        final Map<NodeIdentifier, Map<NodeAttribute, Integer>> counts = new HashMap<>();
+        LOGGER.debug(
+                "addFailedRequest: client: {}, serverEndTime: {}, serverLoad: {}, networkEndTime: {}, networkLoad: {}",
+                client, serverEndTime, serverLoad, networkEndTime, networkLoad);
 
-        NetworkLoadTracker.twoLevelHistoryMapCountSum(computeLoadHistory, cutoff, sums, counts);
-
-        final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> reportDemand = NetworkLoadTracker
-                .twoLevelMapAverage(sums, counts);
-
-        return reportDemand;
-    }
-
-    private final Map<Long, ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>>> computeLoadHistory = new HashMap<>();
-
-    private void updateComputeDemandValues(final long timestamp,
-            @Nonnull final ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> computeLoad) {
-        computeLoadHistory.put(timestamp, computeLoad);
-
-        // clean out old entries from server load and network load
-        final long historyCutoff = timestamp
-                - Math.max(AgentConfiguration.getInstance().getDcopEstimationWindow().toMillis(),
-                        AgentConfiguration.getInstance().getRlgEstimationWindow().toMillis());
-        final Iterator<Map.Entry<Long, ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>>>> serverIter = computeLoadHistory
-                .entrySet().iterator();
-        while (serverIter.hasNext()) {
-            final Map.Entry<Long, ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>>> entry = serverIter
-                    .next();
-            if (entry.getKey() < historyCutoff) {
-
-                if (LOGGER.isTraceEnabled()) {
-                    LOGGER.trace("Removing compute demand value {} because it's time {} is before {}", entry.getValue(),
-                            entry.getKey(), historyCutoff);
-                }
-
-                serverIter.remove();
-            }
-        }
+        computeDemandTracker.addFailedRequest(serverEndTime, serverLoad);
     }
 
     private ImmutableMap<NodeIdentifier, ImmutableMap<NodeAttribute, Double>> getComputeLoad(
@@ -542,27 +487,6 @@ public class MapContainer {
         return new InterfaceIdentifier(nicName, ImmutableSet.copyOf(neighbors));
     }
 
-    /**
-     * 
-     * @return see {@link ContainerResourceReport#getNetworkLoad()}
-     */
-    private ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> getNetworkLoad() {
-        final Map<InterfaceIdentifier, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoad = new HashMap<>();
-
-        // always create the nic load map as this is expected downstream
-        final Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>> baseNetworkLoad = new HashMap<>();
-
-        parent.getNCPResourceMonitor().gatherNetworkInformation(parent.getNode(), containerAddress, iftopProcessor,
-                baseNetworkLoad);
-
-        // we don't know which neighbor interface the traffic came through on
-        // the NCP, so make it appear as if it came from all of them
-        final Set<NodeIdentifier> neighbors = parent.getNode().getNeighbors();
-        networkLoad.put(createInterfaceIdentifier(neighbors), baseNetworkLoad);
-
-        return ImmutableUtils.makeImmutableMap4(networkLoad);
-    }
-
     @Override
     public String toString() {
         return identifier.getName();
@@ -580,6 +504,7 @@ public class MapContainer {
 
         averageRequestProcessTimeRetriever.stopReading();
         activeConnectionCountRetriever.stopReading();
+        failedClientRequestRetriever.stopReading();
 
         LOGGER.debug("stop: end");
     }

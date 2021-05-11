@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -48,9 +48,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nonnull;
 
 import org.apache.commons.csv.CSVPrinter;
+import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.bbn.map.hifi.util.StoppableGenerator;
+import com.bbn.map.hifi.util.network.TrafficGenerator;
 import com.bbn.map.simulator.ClientLoad;
 import com.bbn.map.utils.JsonUtils;
 import com.bbn.protelis.networkresourcemanagement.LinkAttribute;
@@ -64,7 +67,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * 
  * @author awald
  */
-/* package */ class ClientHandler implements Runnable {
+/* package */ class ClientHandler implements Runnable, StoppableGenerator {
     private final Logger logger;
 
     private final SocketChannel clientChannel; // the socket used to communicate
@@ -77,32 +80,25 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
     private final AtomicInteger numberOfClients;
 
-    private final double physicalCores;
-
     private final CSVPrinter latencyLog;
 
     private final NodeLoadExecutor nodeLoadExecutor;
     private final ExecutorService threadPool;
 
-    private NetworkLoadGeneration networkLoadGenerator;
+    private TrafficGenerator networkLoadGenerator;
     private NodeLoadGeneration nodeLoadGenerator;
     private Future<?> networkFuture;
     private Future<?> nodeLoadFuture;
 
-    // default to true and if stopGeneration is called, then this is false
-    private boolean success = true;
-
     private final Object lock = new Object();
+
+    private final FakeLoadServer server;
 
     /**
      * Creates a handler to communicate with a client and produce load.
      * 
      * @param latencyLog
      *            where to log information about processing latency
-     * @param physicalCores
-     *            number of physical cores in the system. This needs to be
-     *            consistent with the number of cores that the fake load library
-     *            sees.
      * @param numberOfClients
      *            used to track how many clients are currently active
      * @param threadPool
@@ -113,19 +109,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
      *            the client number
      * @param nodeLoadExecutor
      *            Used to execute node load
+     * @param server
+     *            the server that accepted the connection. Used to execute
+     *            dependent requests.
      */
-    ClientHandler(@Nonnull final CSVPrinter latencyLog,
-            final double physicalCores,
+    ClientHandler(@Nonnull final FakeLoadServer server,
+            @Nonnull final CSVPrinter latencyLog,
             @Nonnull final AtomicInteger numberOfClients,
             @Nonnull final ExecutorService threadPool,
             @Nonnull final SocketChannel channel,
             final int number,
             @Nonnull final NodeLoadExecutor nodeLoadExecutor) {
+        this.server = Objects.requireNonNull(server);
         this.clientChannel = Objects.requireNonNull(channel);
         this.clientNumber = number;
         this.numberOfClients = Objects.requireNonNull(numberOfClients);
         this.latencyLog = Objects.requireNonNull(latencyLog);
-        this.physicalCores = physicalCores;
         this.threadPool = Objects.requireNonNull(threadPool);
         this.nodeLoadExecutor = nodeLoadExecutor;
         this.logger = LoggerFactory.getLogger(this.getClass().getName() + "." + String.valueOf(number) + "." + channel);
@@ -143,61 +142,95 @@ import com.fasterxml.jackson.databind.ObjectMapper;
         }
     }
 
+    private static final String LOG_ABORT_MESSAGE = "processing failed";
+    private static final String LOG_SUCCESS_MESSAGE = "request_success";
+    private static final String LOG_FAILURE_MESSAGE = "request_failure";
+    private static final String LOG_WRONG_SERVICE_MESSAGE_FORMAT = "wrong service requested {}, but running {}";
+
     private void
-            writeLatencyLog(final String address, final long requestStart, final long requestEnd, final boolean success)
+            writeLatencyLog(final String address, final long requestStart, final long requestEnd, final String message)
                     throws IOException {
         synchronized (latencyLog) {
-            latencyLog.printRecord(System.currentTimeMillis(), success ? "request_success" : "request_failure", address,
-                    requestStart, requestEnd, requestEnd - requestStart);
+            latencyLog.printRecord(System.currentTimeMillis(), message, address, requestStart, requestEnd,
+                    requestEnd - requestStart);
             latencyLog.flush();
         }
     }
 
-    private void handleRequests() {
-
-        final ObjectMapper jsonMapper = JsonUtils.getStandardMapObjectMapper()
-                .disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET).disable(JsonParser.Feature.AUTO_CLOSE_SOURCE);
-
-        String serverHostAddress = "unknown";
+    private String determineClientHostAddress() {
+        String clientHostAddress = "unknown";
         try {
-            final SocketAddress serverAddress = clientChannel.getRemoteAddress();
-            if (serverAddress instanceof InetSocketAddress) {
-                final InetAddress addr = ((InetSocketAddress) serverAddress).getAddress();
+            final SocketAddress clientAddress = clientChannel.getRemoteAddress();
+            if (clientAddress instanceof InetSocketAddress) {
+                final InetAddress addr = ((InetSocketAddress) clientAddress).getAddress();
                 if (null != addr) {
-                    serverHostAddress = addr.getHostAddress();
+                    clientHostAddress = addr.getHostAddress();
                 }
             }
         } catch (final IOException e) {
             logger.warn("Error getting remote address of socket", e);
         }
 
+        return clientHostAddress;
+    }
+
+    private void handleRequests() {
+        final String clientHostAddress = determineClientHostAddress();
+
+        final ObjectMapper jsonMapper = JsonUtils.getStandardMapObjectMapper()
+                .disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET).disable(JsonParser.Feature.AUTO_CLOSE_SOURCE);
+
+        boolean latencyLogWritten = false;
         try (InputStream in = Channels.newInputStream(clientChannel)) {
             final ClientLoad request = jsonMapper.readValue(in, ClientLoad.class);
-
             final long timeRequestReceived = System.currentTimeMillis();
-            processRequest(request);
+
+            final Pair<Boolean, String> result = processRequest(request);
             final long timeRequestProcessed = System.currentTimeMillis();
 
-            final boolean successLocal;
-            synchronized (lock) {
-                successLocal = success;
+            final long serverExpectedEndTime = timeRequestReceived + request.getServerDuration();
+            final long networkExpectedEndTime = timeRequestReceived + request.getNetworkDuration();
+            if (!result.getLeft()) {
+                server.getFailedRequestWriter().writeFailedRequest(request, clientHostAddress, serverExpectedEndTime,
+                        networkExpectedEndTime);
             }
 
             try {
-                writeLatencyLog(serverHostAddress, timeRequestReceived, timeRequestProcessed, successLocal);
+                writeLatencyLog(clientHostAddress, timeRequestReceived, timeRequestProcessed, result.getRight());
             } catch (final IOException e) {
                 logger.error("Error writing latency log", e);
             }
+            latencyLogWritten = true;
+
+            if (result.getLeft()) {
+                // only execute dependent load if the initial request was
+                // successful
+                server.executeDependentLoad(request);
+            }
+
+            logger.trace("Closing client channel at end of try");
         } catch (final IOException e) {
             logger.error("Unable to obtain an input stream to communicate with client " + clientNumber, e);
+        } finally {
+            if (!latencyLogWritten) {
+                logger.warn("Latency log not written, doing write with 0 times");
+                try {
+                    writeLatencyLog(clientHostAddress, 0, 0, LOG_ABORT_MESSAGE);
+                } catch (final IOException e) {
+                    logger.error("Error writing latency log (finally)", e);
+                }
+            }
         }
+        logger.trace("Finished with request, closed client channel");
 
     }
 
-    private void processRequest(final ClientLoad request) {
+    private Pair<Boolean, String> processRequest(final ClientLoad request) {
+        String message = null;
+        boolean success = true;
+
         final double cpu = request.getNodeLoad().getOrDefault(NodeAttribute.CPU,
                 request.getNodeLoad().getOrDefault(NodeAttribute.TASK_CONTAINERS, 0.0));
-        final double scaledCpu = cpu / physicalCores;
         final double memory = request.getNodeLoad().getOrDefault(NodeAttribute.MEMORY, 0.0);
 
         final double tx = request.getNetworkLoad().getOrDefault(LinkAttribute.DATARATE_TX, 0.0);
@@ -205,64 +238,82 @@ import com.fasterxml.jackson.databind.ObjectMapper;
         final long serverDuration = request.getServerDuration();
         final long networkDuration = request.getNetworkDuration();
 
-        logger.info("Request for {} CPU ({} scaled) and {}GB of memory {} network TX", cpu, scaledCpu, memory, tx);
-        try {
-            synchronized (lock) {
-                networkLoadGenerator = new NetworkLoadGeneration(this, threadPool, tx, networkDuration, clientChannel);
-                nodeLoadGenerator = new NodeLoadGeneration(this, nodeLoadExecutor, scaledCpu, memory, serverDuration);
+        logger.info("Request for {} CPU and {}GB of memory {} network TX", cpu, memory, tx);
+        synchronized (lock) {
+            networkLoadGenerator = new TrafficGenerator(threadPool, tx, networkDuration, clientChannel);
+            nodeLoadGenerator = new NodeLoadGeneration(networkLoadGenerator, nodeLoadExecutor, cpu, memory,
+                    serverDuration);
 
-                networkFuture = threadPool.submit(networkLoadGenerator);
-                nodeLoadFuture = threadPool.submit(nodeLoadGenerator);
-            }
-
-            try {
-                networkFuture.get();
-            } catch (final ExecutionException e) {
-                logger.error("Exception thrown executing network load generation", e);
-            } catch (final CancellationException e) {
-                logger.debug("Network generation cancelled", e);
-            } catch (final InterruptedException e) {
-                logger.warn("Interrupted waiting on the network load generation", e);
-            }
-
-            try {
-                nodeLoadFuture.get();
-            } catch (final ExecutionException e) {
-                logger.error("Exception thrown executing node load generation", e);
-            } catch (final CancellationException e) {
-                logger.debug("Node load generation cancelled", e);
-            } catch (final InterruptedException e) {
-                logger.warn("Interrupted waiting on the node load generation", e);
-            }
-
-            synchronized (lock) {
-                networkLoadGenerator = null;
-                nodeLoadGenerator = null;
-                networkFuture = null;
-                nodeLoadFuture = null;
-            }
-
-        } catch (final RuntimeException e) {
-            final String message = String.format("Cannot generate load for request %s", request);
-            logger.error(message, e);
+            networkFuture = threadPool.submit(networkLoadGenerator);
+            nodeLoadFuture = threadPool.submit(nodeLoadGenerator);
         }
+
+        if (!request.getService().equals(server.getExecutingService())) {
+            logger.error("Wrong service requested. Running: {} requested: {}", server.getExecutingService(),
+                    request.getService());
+
+            message = String.format(LOG_WRONG_SERVICE_MESSAGE_FORMAT, request.getService(),
+                    server.getExecutingService());
+            success = false;
+            networkLoadGenerator.sendFailure();
+            nodeLoadFuture.cancel(true);
+        }
+
+        try {
+            logger.debug("Waiting for networkFuture {}", networkFuture);
+            networkFuture.get();
+        } catch (final ExecutionException e) {
+            logger.error("Exception thrown executing network load generation", e);
+        } catch (final CancellationException e) {
+            logger.debug("Network generation cancelled", e);
+        } catch (final InterruptedException e) {
+            logger.warn("Interrupted waiting on the network load generation", e);
+        }
+
+        try {
+            logger.debug("Waiting for nodeLoadFuture {}", nodeLoadFuture);
+            nodeLoadFuture.get();
+        } catch (final ExecutionException e) {
+            logger.error("Exception thrown executing node load generation", e);
+        } catch (final CancellationException e) {
+            logger.debug("Node load generation cancelled", e);
+        } catch (final InterruptedException e) {
+            logger.warn("Interrupted waiting on the node load generation", e);
+        }
+
+        if (null == message) {
+            // if the network load generator is already gone because the
+            // noadLoadGenerator has sent a failure these are nops.
+            if (nodeLoadGenerator.isSuccessful()) {
+                networkLoadGenerator.sendSuccess();
+                message = LOG_SUCCESS_MESSAGE;
+                success = true;
+            } else {
+                networkLoadGenerator.sendFailure();
+                message = LOG_FAILURE_MESSAGE;
+                success = false;
+            }
+        }
+
+        logger.info("Shutting down network load generation");
+        networkLoadGenerator.shutdown();
+        try {
+            networkLoadGenerator.waitForShutdown();
+        } catch (final InterruptedException e) {
+            logger.warn("Interrupted waiting for network generator to shutdown", e);
+        }
+
+        logger.info("Load request complete");
+        return Pair.of(success, message);
     }
 
-    /**
-     * Stop execution of any load.
-     */
+    @Override
     public void stopGeneration(final boolean success) {
         synchronized (lock) {
-            this.success = success;
-            if (null != networkLoadGenerator) {
-                networkLoadGenerator.stopGenerating();
-            }
-            if (null != networkFuture) {
-                networkFuture.cancel(true);
-            }
-            if (null != nodeLoadFuture) {
-                nodeLoadFuture.cancel(true);
-            }
+            networkLoadGenerator = null;
+            nodeLoadGenerator = null;
+            networkFuture = null;
+            nodeLoadFuture = null;
         }
     }
 

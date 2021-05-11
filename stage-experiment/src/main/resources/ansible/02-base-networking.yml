@@ -1,0 +1,38 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: Ensure /etc/map exists
+      file:
+        path: /etc/map
+        state: directory
+        mode: u=rwx,g=rx,o=rx
+        owner: root
+    - name: Copy map_common.py
+      copy:
+        src: map_common.py
+        dest: /etc/map/map_common.py
+        owner: root
+        mode: 0664
+    - name: Copy start network interfaces script
+      copy:
+        src: start_network_interfaces.py
+        dest: /etc/map/start_network_interfaces.py
+        owner: root
+        mode: 0744
+    - name: Ensure all network interfaces are up
+      shell: /etc/map/start_network_interfaces.py
+
+    - name: Ensure /etc/hosts has base entry
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127.0.0.1\s'
+        line: "127.0.0.1 localhost {{inventory_hostname_short}} {{inventory_hostname}}"
+
+    - name: Ensure /etc/resolv.conf is a symlink
+      file:
+        src: /run/systemd/resolve/resolv.conf
+        dest: /etc/resolv.conf
+        state: link
+        force: yes
+        

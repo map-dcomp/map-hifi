@@ -5,8 +5,8 @@
   tasks:
     - name: install pimd
       apt:
-        update_cache: yes
-        name: pimd
+        name:
+          - pimd
 
     - name: copy pimd defaults
       copy:

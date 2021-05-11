@@ -1,0 +1,22 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: resolved.conf format
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: '^[Resolve]'
+        line: '[Resolve]'
+      
+    - name: Use fallback DNS
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        insertafter: '^[Resolve]'
+        regexp: '^DNS='
+        line: 'DNS=155.98.32.70'
+
+    - name: reload systemd-resolved
+      systemd:
+        name: systemd-resolved
+        state: restarted
+

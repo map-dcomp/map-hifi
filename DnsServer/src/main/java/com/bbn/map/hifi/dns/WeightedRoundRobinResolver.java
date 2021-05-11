@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -54,7 +54,6 @@ import java.util.stream.Collectors;
 import org.apache.logging.log4j.CloseableThreadContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.xbill.DNS.Address;
 import org.xbill.DNS.CNAMERecord;
 import org.xbill.DNS.DClass;
 import org.xbill.DNS.DNAMERecord;
@@ -79,6 +78,8 @@ import org.xbill.DNS.TextParseException;
 import org.xbill.DNS.Type;
 import org.xbill.DNS.Zone;
 
+import com.bbn.map.AgentConfiguration;
+import com.bbn.map.hifi.util.DnsUtils;
 import com.diffplug.common.base.Errors;
 
 import se.unlogic.eagledns.EagleDNS;
@@ -109,6 +110,28 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WeightedRoundRobinResolver.class);
     private final Object lock = new Object();
+
+    // default matches that in SimpleResolver
+    private int delegationTimeout = 10;
+
+    /**
+     * 
+     * @param v
+     *            timeout as a string, used by EagleDNS property configuration
+     */
+    public void setDelegationTimeout(final String v) {
+        setDelegationTimeout(Integer.parseInt(v));
+    }
+
+    /**
+     * The amount of time to wait for a response from a delegate DNS server.
+     * 
+     * @param v
+     *            new timeout value in seconds
+     */
+    public void setDelegationTimeout(final int v) {
+        delegationTimeout = v;
+    }
 
     private String logFilePathName = null;
     private BufferedWriter logFileWriter = null;
@@ -150,107 +173,115 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
         Message query = request.getQuery();
         Record queryRecord = query.getQuestion();
 
-        if (queryRecord == null) {
-            return null;
-        }
+        try (CloseableThreadContext.Instance ctc = CloseableThreadContext.push(String.format("client: %s lookup: %s",
+                clientAddress, null == queryRecord ? "null" : queryRecord.getName()))) {
 
-        Name name = queryRecord.getName();
-        Zone zone = findBestZone(name);
-
-        LOGGER.debug("Resolver {} processing request for {} from {} with zone {}", this.name, name, clientAddress,
-                zone);
-
-        if (zone != null) {
-            LOGGER.debug("matching zone found");
-
-            Header header;
-            // boolean badversion;
-            int flags = 0;
-
-            header = query.getHeader();
-            if (header.getFlag(Flags.QR)) {
-                LOGGER.trace("generateReply: QR in header - returning null");
-                return null;
-            }
-            if (header.getRcode() != Rcode.NOERROR) {
-                LOGGER.trace("generateReply: rcode error {}", header.getRcode());
-                return null;
-            }
-            if (header.getOpcode() != Opcode.QUERY) {
-                LOGGER.trace("generateReply: not a query {} - returning null", header.getOpcode());
+            if (queryRecord == null) {
+                LOGGER.debug("generateReply: No query, returning null");
                 return null;
             }
 
-            TSIGRecord queryTSIG = query.getTSIG();
-            TSIG tsig = null;
-            if (queryTSIG != null) {
-                tsig = systemInterface.getTSIG(queryTSIG.getName());
-                if (tsig == null || tsig.verify(query, request.getRawQuery(), request.getRawQueryLength(),
-                        null) != Rcode.NOERROR) {
-                    LOGGER.trace("generateReply: invalid TSIG - returning null");
+            Name name = queryRecord.getName();
+            Zone zone = findBestZone(name);
+
+            LOGGER.debug("Resolver {} processing request for {} from {} with zone {}", this.name, name, clientAddress,
+                    null == zone ? null : zone.getSOA());
+
+            if (zone != null) {
+                LOGGER.debug("matching zone found");
+
+                Header header;
+                // boolean badversion;
+                int flags = 0;
+
+                header = query.getHeader();
+                if (header.getFlag(Flags.QR)) {
+                    LOGGER.trace("generateReply: QR in header - returning null");
                     return null;
                 }
-            }
+                if (header.getRcode() != Rcode.NOERROR) {
+                    LOGGER.trace("generateReply: rcode error {}", header.getRcode());
+                    return null;
+                }
+                if (header.getOpcode() != Opcode.QUERY) {
+                    LOGGER.trace("generateReply: not a query {} - returning null", header.getOpcode());
+                    return null;
+                }
 
-            OPTRecord queryOPT = query.getOPT();
-            // if (queryOPT != null && queryOPT.getVersion() > 0) {
-            // // badversion = true;
-            // }
+                TSIGRecord queryTSIG = query.getTSIG();
+                TSIG tsig = null;
+                if (queryTSIG != null) {
+                    tsig = systemInterface.getTSIG(queryTSIG.getName());
+                    if (tsig == null || tsig.verify(query, request.getRawQuery(), request.getRawQueryLength(),
+                            null) != Rcode.NOERROR) {
+                        LOGGER.trace("generateReply: invalid TSIG - returning null");
+                        return null;
+                    }
+                }
 
-            if (queryOPT != null && (queryOPT.getFlags() & ExtendedFlags.DO) != 0) {
-                flags = EagleDNS.FLAG_DNSSECOK;
-            }
+                OPTRecord queryOPT = query.getOPT();
+                // if (queryOPT != null && queryOPT.getVersion() > 0) {
+                // // badversion = true;
+                // }
 
-            Message response = new Message(query.getHeader().getID());
-            response.getHeader().setFlag(Flags.QR);
-            if (query.getHeader().getFlag(Flags.RD)) {
-                response.getHeader().setFlag(Flags.RD);
-            }
+                if (queryOPT != null && (queryOPT.getFlags() & ExtendedFlags.DO) != 0) {
+                    flags = EagleDNS.FLAG_DNSSECOK;
+                }
 
-            // this servers supports recursion
-            response.getHeader().setFlag(Flags.RA);
+                Message response = new Message(query.getHeader().getID());
+                response.getHeader().setFlag(Flags.QR);
+                if (query.getHeader().getFlag(Flags.RD)) {
+                    response.getHeader().setFlag(Flags.RD);
+                }
 
-            response.addRecord(queryRecord, Section.QUESTION);
+                // this servers supports recursion
+                response.getHeader().setFlag(Flags.RA);
 
-            int type = queryRecord.getType();
-            int dclass = queryRecord.getDClass();
-            if (type == Type.AXFR && request.getSocket() != null) {
-                return doAXFR(name, query, tsig, queryTSIG, request.getSocket());
-            }
-            if (!Type.isRR(type) && type != Type.ANY) {
-                LOGGER.trace("generateReply: Not RR and not ANY {} - returning null", type);
+                response.addRecord(queryRecord, Section.QUESTION);
+
+                int type = queryRecord.getType();
+                int dclass = queryRecord.getDClass();
+                if (type == Type.AXFR && request.getSocket() != null) {
+                    LOGGER.trace("Returning from AXFR");
+                    return doAXFR(name, query, tsig, queryTSIG, request.getSocket());
+                }
+                if (!Type.isRR(type) && type != Type.ANY) {
+                    LOGGER.trace("generateReply: Not RR and not ANY {} - returning null", type);
+                    return null;
+                }
+
+                final byte rcode = addAnswer(timestamp, clientAddress, response, name, type, dclass, 0, flags, zone);
+
+                if (rcode != Rcode.NOERROR && rcode != Rcode.NXDOMAIN) {
+                    LOGGER.trace("generateReply: rcode error: {} - returning error", rcode);
+                    return EagleDNS.errorMessage(query, rcode);
+                }
+
+                addAdditional(response, flags);
+
+                if (queryOPT != null) {
+                    final int optflags = (flags == EagleDNS.FLAG_DNSSECOK) ? ExtendedFlags.DO : 0;
+                    final OPTRecord opt = new OPTRecord((short) 4096, rcode, (byte) 0, optflags);
+                    response.addRecord(opt, Section.ADDITIONAL);
+                }
+
+                response.setTSIG(tsig, Rcode.NOERROR, queryTSIG);
+
+                if (rcode == Rcode.NXDOMAIN) {
+                    LOGGER.trace("generateReply: returning no name for {} due to NXDOMAIN", name);
+                }
+
+                LOGGER.debug("Response is: {}", response);
+
+                return response;
+
+            } else {
+
+                LOGGER.trace("Resolver " + this.name + " ignoring request for " + name + ", no matching zone found");
+
                 return null;
             }
-
-            final byte rcode = addAnswer(timestamp, clientAddress, response, name, type, dclass, 0, flags, zone);
-
-            if (rcode != Rcode.NOERROR && rcode != Rcode.NXDOMAIN) {
-                LOGGER.trace("generateReply: rcode error: {} - returning error", rcode);
-                return EagleDNS.errorMessage(query, rcode);
-            }
-
-            addAdditional(response, flags);
-
-            if (queryOPT != null) {
-                final int optflags = (flags == EagleDNS.FLAG_DNSSECOK) ? ExtendedFlags.DO : 0;
-                final OPTRecord opt = new OPTRecord((short) 4096, rcode, (byte) 0, optflags);
-                response.addRecord(opt, Section.ADDITIONAL);
-            }
-
-            response.setTSIG(tsig, Rcode.NOERROR, queryTSIG);
-
-            if (rcode == Rcode.NXDOMAIN) {
-                LOGGER.trace("generateReply: returning no name for {} due to NXDOMAIN", name);
-            }
-
-            return response;
-
-        } else {
-
-            LOGGER.debug("Resolver " + this.name + " ignoring request for " + name + ", no matching zone found");
-
-            return null;
-        }
+        } // logging context
     }
 
     private void addAdditional(Message response, int flags) {
@@ -270,154 +301,152 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
             final int iterations,
             int flags,
             Zone zone) {
-        try (CloseableThreadContext.Instance ctc = CloseableThreadContext
-                .push(String.format("client: %s name: %s type: %d", clientAddress, name, type))) {
+        LOGGER.trace("{} Looking up {} with type {} zone {}", clientAddress, name, type,
+                null == zone ? null : zone.getSOA());
 
-            LOGGER.trace("{} Looking up {} with type {} zone {}", clientAddress, name, type, zone);
+        SetResponse sr;
+        byte rcode = Rcode.NOERROR;
 
-            SetResponse sr;
-            byte rcode = Rcode.NOERROR;
+        if (iterations > MAX_ITERATIONS) {
+            LOGGER.warn("Hit {} iterations resolving {}", MAX_ITERATIONS, name);
+            return Rcode.NOERROR;
+        }
 
-            if (iterations > MAX_ITERATIONS) {
-                return Rcode.NOERROR;
-            }
+        if (type == Type.SIG || type == Type.RRSIG) {
+            type = Type.ANY;
+            flags |= EagleDNS.FLAG_SIGONLY;
+        }
 
-            if (type == Type.SIG || type == Type.RRSIG) {
-                type = Type.ANY;
-                flags |= EagleDNS.FLAG_SIGONLY;
-            }
+        if (zone == null) {
+            zone = findBestZone(name);
+            LOGGER.trace("findBestZone returned {}", zone.getSOA());
+        }
 
-            if (zone == null) {
-                zone = findBestZone(name);
-                LOGGER.trace("findBestZone returned {}", zone);
-            }
+        if (zone != null) {
+            sr = zone.findRecords(name, type);
+            LOGGER.trace("Found records: {} type: {}, if NXDOMAIN and type is 1, will look in weightedRecords", sr,
+                    type);
 
-            if (zone != null) {
-                sr = zone.findRecords(name, type);
-                LOGGER.trace("Found records: {}", sr);
+            if (sr.isNXDOMAIN() && type == Type.A) {
+                // only use weighting for records that aren't in the
+                // standard
+                // zone
 
-                if (sr.isNXDOMAIN() && type == Type.A) {
-                    // only use weighting for records that aren't in the
-                    // standard
-                    // zone
+                final WeightedRecordList weightedList;
+                synchronized (lock) {
+                    LOGGER.trace("Looking for {} in {}", name, weightedRecords);
 
-                    final WeightedRecordList weightedList;
-                    synchronized (lock) {
-                        LOGGER.trace("Looking for {} in {}", name, weightedRecords);
+                    weightedList = weightedRecords.get(name);
+                }
+                LOGGER.trace("weightedList: {}", weightedList);
 
-                        weightedList = weightedRecords.get(name);
-                    }
-                    LOGGER.trace("weightedList: {}", weightedList);
-
-                    if (null == weightedList) {
-                        // not found
-                        respondWithNxdomain(response, iterations, zone);
-                        rcode = Rcode.NXDOMAIN;
-                    } else {
-                        try {
-                            final Record record = weightedList.query();
-                            if (null == record) {
-                                LOGGER.debug("Got an empty weighted list for {}, returning NXDOMAIN", name);
-
-                                respondWithNxdomain(response, iterations, zone);
-                                rcode = Rcode.NXDOMAIN;
-                            } else {
-                                LOGGER.trace("Found weighted record: {}", record);
-
-                                // if we have a response, then we are
-                                // authoritative
-                                response.getHeader().setFlag(Flags.AA);
-
-                                final RRset rrset = new RRset(record);
-
-                                addRRset(name, response, rrset, Section.ANSWER, flags);
-
-                                addNS(response, zone, flags);
-
-                                writeLogEntry(timestamp, clientAddress, name, record);
-
-                                if (record instanceof CNAMERecord) {
-                                    rcode = addAnswer(timestamp, clientAddress, response,
-                                            ((CNAMERecord) record).getTarget(), type, dclass, iterations + 1, flags,
-                                            null);
-                                } else {
-                                    rcode = Rcode.NOERROR;
-                                }
-
-                            }
-
-                        } catch (final TextParseException e) {
-                            LOGGER.error("Found invalid name in weighted records, returning NXDOMAIN", e);
+                if (null == weightedList) {
+                    // not found
+                    respondWithNxdomain(response, iterations, zone);
+                    rcode = Rcode.NXDOMAIN;
+                } else {
+                    try {
+                        final Record record = weightedList.query();
+                        if (null == record) {
+                            LOGGER.debug("Got an empty weighted list for {}, returning NXDOMAIN", name);
 
                             respondWithNxdomain(response, iterations, zone);
                             rcode = Rcode.NXDOMAIN;
+                        } else {
+                            LOGGER.trace("Found weighted record: {}", record);
+
+                            // if we have a response, then we are
+                            // authoritative
+                            response.getHeader().setFlag(Flags.AA);
+
+                            final RRset rrset = new RRset(record);
+
+                            addRRset(name, response, rrset, Section.ANSWER, flags);
+
+                            addNS(response, zone, flags);
+
+                            writeLogEntry(timestamp, clientAddress, name, record);
+
+                            if (record instanceof CNAMERecord) {
+                                rcode = addAnswer(timestamp, clientAddress, response,
+                                        ((CNAMERecord) record).getTarget(), type, dclass, iterations + 1, flags, null);
+                            } else {
+                                rcode = Rcode.NOERROR;
+                            }
+
                         }
-                    }
 
-                } else if (sr.isNXRRSET()) {
-                    LOGGER.trace("Got NXRRSET looking for address {} with type {} from client {}", name, type,
-                            clientAddress);
-                    addSOA(response, zone);
-                    if (iterations == 0) {
-                        response.getHeader().setFlag(Flags.AA);
-                    }
-                } else if (sr.isDelegation()) {
-                    final RRset nsRecords = sr.getNS();
+                    } catch (final TextParseException e) {
+                        LOGGER.error("Found invalid name in weighted records, returning NXDOMAIN", e);
 
-                    LOGGER.trace("Inside delegation. NS records: {}", nsRecords);
-
-                    addRRset(nsRecords.getName(), response, nsRecords, Section.AUTHORITY, flags);
-
-                    final List<Name> nameServers = new LinkedList<>();
-                    final Iterator<?> it = nsRecords.rrs();
-                    while (it.hasNext()) {
-                        final NSRecord r = (NSRecord) it.next();
-                        nameServers.add(r.getTarget());
-                    }
-
-                    // send a message to the other server(s) here
-                    rcode = resolveDelegation(name, type, dclass, nameServers, response);
-
-                } else if (sr.isCNAME()) {
-                    CNAMERecord cname = sr.getCNAME();
-                    RRset rrset = new RRset(cname);
-                    addRRset(name, response, rrset, Section.ANSWER, flags);
-                    if (iterations == 0) {
-                        response.getHeader().setFlag(Flags.AA);
-                    }
-                    rcode = addAnswer(timestamp, clientAddress, response, cname.getTarget(), type, dclass,
-                            iterations + 1, flags, null);
-                } else if (sr.isDNAME()) {
-                    DNAMERecord dname = sr.getDNAME();
-                    RRset rrset = new RRset(dname);
-                    addRRset(name, response, rrset, Section.ANSWER, flags);
-                    Name newname;
-                    try {
-                        newname = name.fromDNAME(dname);
-                    } catch (NameTooLongException e) {
-                        return Rcode.YXDOMAIN;
-                    }
-                    rrset = new RRset(new CNAMERecord(name, dclass, 0, newname));
-                    addRRset(name, response, rrset, Section.ANSWER, flags);
-                    if (iterations == 0) {
-                        response.getHeader().setFlag(Flags.AA);
-                    }
-                    rcode = addAnswer(timestamp, clientAddress, response, newname, type, dclass, iterations + 1, flags,
-                            null);
-                } else if (sr.isSuccessful()) {
-                    RRset[] rrsets = sr.answers();
-                    for (RRset rrset : rrsets) {
-                        addRRset(name, response, rrset, Section.ANSWER, flags);
-                    }
-                    addNS(response, zone, flags);
-                    if (iterations == 0) {
-                        response.getHeader().setFlag(Flags.AA);
+                        respondWithNxdomain(response, iterations, zone);
+                        rcode = Rcode.NXDOMAIN;
                     }
                 }
-            }
 
-            return rcode;
-        } // end logging context
+            } else if (sr.isNXRRSET()) {
+                LOGGER.trace("Got NXRRSET looking for address {} with type {} from client {}", name, type,
+                        clientAddress);
+                addSOA(response, zone);
+                if (iterations == 0) {
+                    response.getHeader().setFlag(Flags.AA);
+                }
+            } else if (sr.isDelegation()) {
+                final RRset nsRecords = sr.getNS();
+
+                LOGGER.trace("Inside delegation. NS records: {}", nsRecords);
+
+                addRRset(nsRecords.getName(), response, nsRecords, Section.AUTHORITY, flags);
+
+                final List<Name> nameServers = new LinkedList<>();
+                final Iterator<?> it = nsRecords.rrs();
+                while (it.hasNext()) {
+                    final NSRecord r = (NSRecord) it.next();
+                    nameServers.add(r.getTarget());
+                }
+
+                // send a message to the other server(s) here
+                rcode = resolveDelegation(name, type, dclass, nameServers, response);
+
+            } else if (sr.isCNAME()) {
+                CNAMERecord cname = sr.getCNAME();
+                RRset rrset = new RRset(cname);
+                addRRset(name, response, rrset, Section.ANSWER, flags);
+                if (iterations == 0) {
+                    response.getHeader().setFlag(Flags.AA);
+                }
+                rcode = addAnswer(timestamp, clientAddress, response, cname.getTarget(), type, dclass, iterations + 1,
+                        flags, null);
+            } else if (sr.isDNAME()) {
+                DNAMERecord dname = sr.getDNAME();
+                RRset rrset = new RRset(dname);
+                addRRset(name, response, rrset, Section.ANSWER, flags);
+                Name newname;
+                try {
+                    newname = name.fromDNAME(dname);
+                } catch (NameTooLongException e) {
+                    return Rcode.YXDOMAIN;
+                }
+                rrset = new RRset(new CNAMERecord(name, dclass, 0, newname));
+                addRRset(name, response, rrset, Section.ANSWER, flags);
+                if (iterations == 0) {
+                    response.getHeader().setFlag(Flags.AA);
+                }
+                rcode = addAnswer(timestamp, clientAddress, response, newname, type, dclass, iterations + 1, flags,
+                        null);
+            } else if (sr.isSuccessful()) {
+                RRset[] rrsets = sr.answers();
+                for (RRset rrset : rrsets) {
+                    addRRset(name, response, rrset, Section.ANSWER, flags);
+                }
+                addNS(response, zone, flags);
+                if (iterations == 0) {
+                    response.getHeader().setFlag(Flags.AA);
+                }
+            }
+        }
+
+        return rcode;
     }
 
     private void writeLogEntry(final long timestamp, final String clientAddress, final Name name, final Record record) {
@@ -449,13 +478,35 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
             final Message response) {
         byte rcode = -1;
         for (final Name serverName : nameServers) {
+            final String serverHostName = serverName.toString(true);
+
+            long resolveStartTime = Long.MAX_VALUE;
+            long resolveDuration;
+
             try {
-                final SimpleResolver resolver = new SimpleResolver(serverName.toString(true));
+                // cache the resolvers for performance, not thread safe so using
+                // ThreadLocal
+                if (!resolverCache.get().containsKey(serverHostName)) {
+                    final SimpleResolver resolver = new SimpleResolver(serverHostName);
+                    resolver.setTimeout(delegationTimeout);
+                    if (AgentConfiguration.getInstance().getDnsDelegationUseTcp()) {
+                        resolver.setTCP(true);
+                    }
+
+                    resolverCache.get().put(serverHostName, resolver);
+                }
+                final SimpleResolver resolver = resolverCache.get().get(serverHostName);
 
                 final Record queryRecord = Record.newRecord(name, type, dclass);
                 final Message query = Message.newQuery(queryRecord);
 
+                resolveStartTime = System.currentTimeMillis();
                 final Message delegateResponse = resolver.send(query);
+                resolveDuration = System.currentTimeMillis() - resolveStartTime;
+
+                LOGGER.debug("duration of successful resolver.send for destination {}: {} ms", resolver.getAddress(),
+                        resolveDuration);
+
                 if (rcode == -1) {
                     // just use it
                     rcode = (byte) delegateResponse.getRcode();
@@ -489,8 +540,10 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
                 LOGGER.error("Error resolving nameserver address '{}' in {}: {}", serverName.toString(true),
                         nameServers, e.getMessage(), e);
             } catch (final IOException e) {
-                LOGGER.error("Error querying server '{}' in list {}: {}", serverName.toString(true), nameServers,
-                        e.getMessage(), e);
+                resolveDuration = System.currentTimeMillis() - resolveStartTime;
+
+                LOGGER.error("Error querying server '{}' in list {} after {} ms: {}", serverName.toString(true),
+                        nameServers, resolveDuration, e.getMessage(), e);
             }
         }
         if (-1 == rcode) {
@@ -532,7 +585,7 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
             NSRecord record = (NSRecord) nsIterator.next();
 
             try {
-                String nsIP = Address.getByName(record.getTarget().toString()).getHostAddress();
+                String nsIP = DnsUtils.getByName(record.getTarget().toString()).getHostAddress();
 
                 if (socket.getInetAddress().getHostAddress().equals(nsIP)) {
 
@@ -750,14 +803,14 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
      * Set the list of weighted records. This merges changes in the current
      * records list.
      * 
-     * @param records
-     *            the new weighted records
+     * @param message
+     *            the new weighted record information
      * @throws RuntimeException
      *             if one of the CNAME names is not a valid DNS name
      */
-    public void setWeightedRecords(final Collection<WeightedRecordList> records) throws RuntimeException {
+    public void setWeightedRecords(final RecordUpdateMessage message) throws RuntimeException {
         final Map<Name, WeightedRecordList> newWeightedRecords = new HashMap<>();
-        records.forEach(Errors.rethrow().wrap(r -> {
+        toWeightedRecordList(message).forEach(Errors.rethrow().wrap(r -> {
             final String nameStr = r.getName();
             // add '.' to make absolute
             final Name name = Name.fromString(nameStr + ".");
@@ -785,6 +838,23 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
         }
     }
 
+    private static Collection<WeightedRecordList> toWeightedRecordList(final RecordUpdateMessage message) {
+
+        final Collection<WeightedRecordList> recordLists = message.getAliasMessages().stream().map(aliasMessage -> {
+            final String name = aliasMessage.getHostname();
+            final int ttl = message.getTtl();
+
+            final List<WeightedCNAMERecord> records = aliasMessage.getResolutionTargets().stream()
+                    .map(resolutionTarget -> {
+                        return new WeightedCNAMERecord(name, resolutionTarget.getTarget(), ttl,
+                                resolutionTarget.getWeight());
+                    }).collect(Collectors.toList());
+
+            return new WeightedRecordList(name, records);
+        }).collect(Collectors.toList());
+        return recordLists;
+    }
+
     private static WeightedRecordList mergeWeightedRecordList(final WeightedRecordList one,
             final WeightedRecordList two) {
         if (!one.getName().equals(two.getName())) {
@@ -803,5 +873,16 @@ public class WeightedRoundRobinResolver extends BasePlugin implements Resolver {
         final WeightedRecordList retval = new WeightedRecordList(one.getName(), mergedRecords);
         return retval;
     }
+
+    private static final class ResolverCache extends ThreadLocal<Map<String, SimpleResolver>> {
+        private static final ResolverCache INSTANCE = new ResolverCache();
+
+        @Override
+        protected Map<String, SimpleResolver> initialValue() {
+            return new HashMap<>();
+        }
+    }
+
+    private ThreadLocal<Map<String, SimpleResolver>> resolverCache = ResolverCache.INSTANCE;
 
 }

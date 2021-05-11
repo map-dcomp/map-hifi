@@ -1,0 +1,8 @@
+---
+- import_playbook: 45-client-pre-start.yml
+- import_playbook: fetch_images.yml
+  when: prefetch_images == "1"
+- import_playbook: sysinfo/install.yml
+- import_playbook: sysinfo/start.yml
+- import_playbook: 50-start_map_agent.yml
+

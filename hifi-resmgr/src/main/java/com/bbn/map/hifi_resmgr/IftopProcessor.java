@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -36,37 +36,38 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
-import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.nio.charset.Charset;
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
+import java.util.StringTokenizer;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.annotation.Nonnull;
 
 import org.apache.commons.io.LineIterator;
-import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.ImmutableMap;
+import com.bbn.map.AgentConfiguration;
+import com.google.common.collect.Streams;
 
 /**
  * Spawn an iftop process and turn the output into {@link NICTrafficDataFrame}
- * objects.
+ * objects. Uses a customized iftop binary.
  * 
  * @author jschewe
  * @author awald
  *
  */
-public class IftopProcessor extends Thread {
+public class IftopProcessor extends BaseIftopProcessor {
 
     private final Logger log;
-
-    private final Object lock = new Object();
 
     /**
      * The value used when the port number cannot be determined.
@@ -79,16 +80,36 @@ public class IftopProcessor extends Thread {
      */
     private static final long IFTOP_UPDATE_INTERVAL = 2000;
 
+    private static final String NETWORK_INTERFACE_PLACEHOLDER = "[nic]";
+
+    private static final String NICE_PRIORITY_PLACEHOLDER = "[nice_priority]";
+
+    /**
+     * Maximum number of flows to read from iftop. If there are more flows than
+     * this seen on an interface, they will be ignored.
+     */
+    private static final int MAX_IFTOP_FLOWS = 1_000_000;
+
     /**
      * Command to run iftop.
      */
-    private static final String[] IFTOP_COMMAND = { "sudo", "iftop", "-n", "-t", "-N", "-P", "-i", "[nic]" };
+    private static final String[] IFTOP_COMMAND = { "sudo", "nice", "-n", NICE_PRIORITY_PLACEHOLDER,
+            "/var/lib/map/iftop", "-n", "-k", "-N", "-P", "-L", String.valueOf(MAX_IFTOP_FLOWS), "-i",
+            NETWORK_INTERFACE_PLACEHOLDER };
 
     private Process iftopProcess;
     private final NetworkInterface nic;
     private final Timer timer = new Timer();
 
-    private List<IftopTrafficData> lastIftopFrame = null;
+    private final AtomicBoolean running = new AtomicBoolean();
+
+    /**
+     * Stop reading data from iftop.
+     */
+    @Override
+    public void stopProcessing() {
+        running.set(false);
+    }
 
     /**
      * 
@@ -115,6 +136,13 @@ public class IftopProcessor extends Thread {
 
     @Override
     public void run() {
+        if (null == iftopProcess) {
+            log.error("iftop not running, cannot process data");
+            return;
+        }
+
+        running.set(true);
+
         log.debug("Begin processing for iftop for: {}", nic.getDisplayName());
 
         try (BufferedReader reader = new BufferedReader(
@@ -141,7 +169,7 @@ public class IftopProcessor extends Thread {
                 try (LineIterator lineIter = new LineIterator(reader)) {
                     final List<String> iftopOutLines = new LinkedList<>();
 
-                    while (lineIter.hasNext()) {
+                    while (running.get() && lineIter.hasNext()) {
                         final String line = lineIter.next();
                         log.trace("IftopParseThread: read line: {}", line);
 
@@ -149,11 +177,7 @@ public class IftopProcessor extends Thread {
                             final List<IftopTrafficData> frame = processIftopOutputFrame(nic, iftopOutLines);
                             log.trace("IftopParseThread: created frame: {}", frame);
 
-                            // lastIftopFrame = frame;
-                            synchronized (lock) {
-                                log.trace("IftopParseThread: add frame for NIC {} to lastIftopFrames.", nic);
-                                lastIftopFrame = frame;
-                            }
+                            setLastIftopFrames(frame);
 
                             iftopOutLines.clear();
                         } else {
@@ -162,6 +186,14 @@ public class IftopProcessor extends Thread {
                     }
                 } catch (IOException e) {
                     log.error("Error reading from iftop: {}", e.getMessage(), e);
+                } finally {
+                    log.info("Sending 'q' to iftop to ask it to stop");
+                    try {
+                        writer.write('q');
+                        writer.flush();
+                    } catch (IOException e) {
+                        log.error("Failed to write 'q' to update iftop output", e);
+                    }
                 }
 
             } catch (IOException e) {
@@ -169,79 +201,31 @@ public class IftopProcessor extends Thread {
             }
         } catch (IOException e) {
             log.error("Failed to obtain InputStream from iftop: {}", e.getMessage(), e);
+        } finally {
+            stopIftop();
         }
     }
 
     /**
-     * Parse an ip address and port. If the port is not in the string, return 0
-     * for the port.
-     * 
-     * @param str
-     *            the string to be parsed, expecting ip:port.
-     * @return (address, port)
+     * If the process doesn't die after this much time, force kill.
      */
-    private static Pair<String, Integer> parseAddressAndPort(final String str) {
-        final int indexOfOpenBracket = str.indexOf('[');
-        final int indexOfCloseBracket = str.indexOf(']');
+    private static final Duration STOP_TIMEOUT = Duration.ofSeconds(10);
 
-        if ("::".equals(str)) {
-            // Java should handle this properly, but for some reason it doesn't
-            // always resolve properly
-            // :: is IPv6 for localhost
-            final InetAddress localLoopback = InetAddress.getLoopbackAddress();
-            return Pair.of(localLoopback.getHostAddress(), UNKNOWN_PORT);
-        } else if (-1 != indexOfOpenBracket && -1 != indexOfCloseBracket) {
-            // [IPv6]:port
-            // [2607:f8b0:4009:810::201e]:443
-            final String ip = str.substring(indexOfOpenBracket + 1, indexOfCloseBracket);
-            final String portStr = str.substring(indexOfCloseBracket + 2);
-            try {
-                final int port = Integer.parseInt(portStr);
-                return Pair.of(ip, port);
-            } catch (final NumberFormatException e) {
-                LoggerFactory.getLogger(IftopProcessor.class)
-                        .warn("Got odd value from iftop for IP and port (invalid number): '{}'", str);
-                return Pair.of(ip, UNKNOWN_PORT);
-            }
-        } else if (-1 != indexOfOpenBracket) {
-            // [IPv6:port
-            // [2601:444:47f:c71e:617a:817:f3be:8:56640
-            final String ip = str.substring(indexOfOpenBracket + 1);
+    private void stopIftop() {
+        if (null != iftopProcess) {
+            log.info("Killing iftop");
 
-            final int lastColon = str.lastIndexOf(':');
-            final String portStr = str.substring(lastColon + 1);
+            iftopProcess.destroy();
             try {
-                final int port = Integer.parseInt(portStr);
-                return Pair.of(ip, port);
-            } catch (final NumberFormatException e) {
-                LoggerFactory.getLogger(IftopProcessor.class)
-                        .warn("Got odd value from iftop for IPv6 and port (invalid number): '{}'", str);
-                return Pair.of(ip, UNKNOWN_PORT);
+                iftopProcess.waitFor(STOP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (final InterruptedException e) {
+                log.warn("Interrupted waiting for client process to exit", e);
             }
-        } else if (str.chars().filter(c -> c == ':').count() > 1) {
-            // IPv6 address and no known port
-            return Pair.of(str, UNKNOWN_PORT);
-        } else if (str.contains(":")) {
-            // IPv4
-            // 73.37.165.179:39430
-            final String[] tokens = str.split(":");
-            if (tokens.length < 2) {
-                LoggerFactory.getLogger(IftopProcessor.class)
-                        .warn("Got odd value from iftop for IP and port (too few tokens): '{}'", str);
-                return Pair.of(str, UNKNOWN_PORT);
-            } else {
-                final String ip = tokens[0];
-                try {
-                    final int port = Integer.parseInt(tokens[1]);
-                    return Pair.of(ip, port);
-                } catch (final NumberFormatException e) {
-                    LoggerFactory.getLogger(IftopProcessor.class)
-                            .warn("Got odd value from iftop for IP and port (invalid number): '{}'", str);
-                    return Pair.of(ip, UNKNOWN_PORT);
-                }
+            if (iftopProcess.isAlive()) {
+                log.info("Forcibly killing iftop");
+                iftopProcess.destroyForcibly();
             }
-        } else {
-            return Pair.of(str, UNKNOWN_PORT);
+            iftopProcess = null;
         }
     }
 
@@ -254,90 +238,48 @@ public class IftopProcessor extends Thread {
      *            the lines from iftop
      * @return the parsed data
      */
-    public static List<IftopTrafficData> processIftopOutputFrame(@Nonnull final NetworkInterface nic,
+    private static List<IftopTrafficData> processIftopOutputFrame(@Nonnull final NetworkInterface nic,
             @Nonnull final List<String> iftopOutLines) {
         final List<IftopTrafficData> frame = new LinkedList<>();
-
-        // if (true)
-        // return frame;
-
-        int frameSection = 0;
-
-        // int last2sColumn;
-
-        // local is sending to remote
-        String localIP = null;
-        int localPort = 0;
-        String remoteIP = null;
-        int remotePort = 0;
-        long last2sBitsSent = -1;
-        long last2sBitsReceived = -1;
 
         for (String line : iftopOutLines) {
             LoggerFactory.getLogger(IftopProcessor.class).trace("Parse line: " + line);
 
-            // check for section divider
-            if (line.contains("-----------------")) {
-                frameSection++;
-            } else {
-                switch (frameSection) {
-                // header
-                case 0:
-                    break;
-
-                // IP Address Specific network usage section
-                case 1:
-                    String[] temp;
-                    String[] leftColumns;
-                    String[] rightColumns;
-
+            try {
+                if (line.indexOf(';') < 0) {
+                    // not a line we will parse
+                    continue;
+                } else {
+                    /*
+                     * Using indexOf and StringTokenizer here rather than split
+                     * as it's been benchmarked by others to be much faster.
+                     * http://demeranville.com/battle-of-the-tokenizers-
+                     * delimited-text-parser-performance/
+                     */
                     LoggerFactory.getLogger(IftopProcessor.class).debug("Parse line for NIC '{}': {}", nic, line);
-                    final boolean sent = line.contains("=>");
-                    final boolean received = line.contains("<=");
-                    if (sent) {
-                        // 1 192.168.42.104:36888 => 13.8Kb 13.8Kb 13.8Kb 3.44KB
-                        temp = line.split("=>");
 
-                        leftColumns = ProcFileParserUtils.splitByWhiteSpace(temp[0]);
-                        rightColumns = ProcFileParserUtils.splitByWhiteSpace(temp[1]);
+                    final StringTokenizer tokens = new StringTokenizer(line, ";");
+                    final String localIp = tokens.nextToken();
+                    final int localPort = Integer.parseInt(tokens.nextToken());
+                    final String remoteIp = tokens.nextToken();
+                    final int remotePort = Integer.parseInt(tokens.nextToken());
+                    final long sentBitsStr = Long.parseLong(tokens.nextToken());
+                    final long recvBits = Long.parseLong(tokens.nextToken());
 
-                        final Pair<String, Integer> localResult = parseAddressAndPort(leftColumns[2]);
-                        localIP = localResult.getLeft();
-                        localPort = localResult.getRight();
+                    // add data to frame, skip if missing data from
+                    // a parsing error
+                    LoggerFactory.getLogger(IftopProcessor.class).debug(
+                            "Add IP Usage Data: \nLocal IP: {} Remote IP: {} Last 2s Bits Sent: {} Last 2s bits received: {}",
+                            localIp, remoteIp, sentBitsStr, recvBits);
+                    final IftopTrafficData data = new IftopTrafficData(localIp, localPort, remoteIp, remotePort,
+                            sentBitsStr, recvBits, nic);
+                    frame.add(data);
 
-                        last2sBitsSent = dataAmountStringToBits(rightColumns[1]);
-                    } else if (received) {
-                        // 192.1.101.20:443 <= 12.1Kb 12.1Kb 12.1Kb 3.04KB
-                        temp = line.split("<=");
-                        leftColumns = ProcFileParserUtils.splitByWhiteSpace(temp[0]);
-                        rightColumns = ProcFileParserUtils.splitByWhiteSpace(temp[1]);
-
-                        final Pair<String, Integer> remoteResult = parseAddressAndPort(leftColumns[1]);
-                        remoteIP = remoteResult.getLeft();
-                        remotePort = remoteResult.getRight();
-
-                        last2sBitsReceived = dataAmountStringToBits(rightColumns[1]);
-
-                        // add data to frame
-                        LoggerFactory.getLogger(IftopProcessor.class).debug(
-                                "Add IP Usage Data: \nLocal IP: {} Remote IP: {} Last 2s Bits Sent: {} Last 2s bits received: {}",
-                                localIP, remoteIP, last2sBitsSent, last2sBitsReceived);
-                        final IftopTrafficData data = new IftopTrafficData(localIP, localPort, remoteIP, remotePort,
-                                last2sBitsSent, last2sBitsReceived, nic);
-                        frame.add(data);
-                        localIP = null;
-                        remoteIP = null;
-                        last2sBitsSent = -1;
-                        last2sBitsReceived = -1;
-                    }
-
-                    break;
-
-                default:
-                    break;
-                }
+                } // line to parse
+            } catch (final RuntimeException e) {
+                LoggerFactory.getLogger(IftopProcessor.class).error("Error parsing line '{}', skipping", line, e);
             }
-        }
+        } // foreach line
 
         return frame;
     }
@@ -350,67 +292,22 @@ public class IftopProcessor extends Thread {
      *            the network interface to monitor
      * @return the command and arguments to be executed
      */
-    public static String[] generateIftopCommand(final String nicName) {
-        String[] command = new String[IFTOP_COMMAND.length];
-
-        for (int n = 0; n < command.length; n++) {
-            switch (IFTOP_COMMAND[n]) {
-            case "[nic]":
-                command[n] = nicName;
-                break;
-
-            default:
-                command[n] = IFTOP_COMMAND[n];
-                break;
-            }
-        }
+    private static String[] generateIftopCommand(final String nicName) {
+        final List<String> extraArguments = AgentConfiguration.getInstance().getExtraIftopArguments();
+        final String[] command = Streams.concat(Arrays.stream(IFTOP_COMMAND), extraArguments.stream()) //
+                .map(arg -> {
+                    switch (arg) {
+                    case NETWORK_INTERFACE_PLACEHOLDER:
+                        return nicName;
+                    case NICE_PRIORITY_PLACEHOLDER:
+                        return String.valueOf(AgentConfiguration.getInstance().getIftopPriority());
+                    default:
+                        return arg;
+                    }
+                }) //
+                .toArray(String[]::new);
 
         return command;
-    }
-
-    /**
-     * @return the most recently produced frames for this NIC, may be null
-     */
-    public List<IftopTrafficData> getLastIftopFrames() {
-        synchronized (lock) {
-            final List<IftopTrafficData> frame = lastIftopFrame;
-            // lastIftopFrame = null;
-
-            log.trace("getLastIftopFrames: found frame: {}", frame);
-
-            return frame;
-        }
-    }
-
-    private static final long KB_TO_BYTES = 1024L;
-    private static final ImmutableMap<String, Long> DATA_UNIT_TO_BITS = ImmutableMap.of("b", 1L, //
-            "Kb", KB_TO_BYTES, //
-            "Mb", KB_TO_BYTES * KB_TO_BYTES, //
-            "Gb", KB_TO_BYTES * KB_TO_BYTES * KB_TO_BYTES);
-
-    /**
-     * Parses a string representation of an amount of a certain unit of data.
-     * 
-     * @param dataAmount
-     *            a number followed by a unit of data: 'b' for bits 'Kb' for
-     *            Kilobits 'Mb' for Megabits 'Gb' for Gigabits
-     * @return the number of bits that the string represents
-     */
-    private static long dataAmountStringToBits(final String dataAmount) {
-        long multiplier = 0;
-        float number = 0;
-        final String unit = dataAmount.replaceFirst("^[0-9]*\\.[0-9]+|[0-9]+", "");
-
-        for (Map.Entry<String, Long> e : DATA_UNIT_TO_BITS.entrySet()) {
-            final String mapUnit = e.getKey();
-            if (unit.equals(mapUnit)) {
-                number = Float.parseFloat(dataAmount.substring(0, dataAmount.length() - mapUnit.length()));
-                multiplier = e.getValue();
-                break;
-            }
-        }
-
-        return (long) (number * multiplier);
     }
 
 }

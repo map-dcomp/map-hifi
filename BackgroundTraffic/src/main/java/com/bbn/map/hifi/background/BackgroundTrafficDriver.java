@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -62,10 +62,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.bbn.map.hifi.HiFiAgent;
+import com.bbn.map.hifi.dns.DnsServer;
 import com.bbn.map.hifi.simulation.SimDriver;
 import com.bbn.map.hifi.simulation.SimRequest;
 import com.bbn.map.hifi.simulation.SimResponse;
 import com.bbn.map.hifi.simulation.SimResponseStatus;
+import com.bbn.map.hifi.util.AbsoluteClock;
 import com.bbn.map.hifi.util.ConcurrencyUtils;
 import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.hifi.util.IdentifierUtils;
@@ -79,6 +81,8 @@ import com.bbn.protelis.utils.VirtualClock;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.MappingIterator;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
@@ -139,7 +143,7 @@ public final class BackgroundTrafficDriver {
 
         final Options options = new Options();
         options.addOption(null, HiFiAgent.CONFIGURATION_DIRECTORY_OPT, true,
-                "The directory to read the configuration from (default: " + HiFiAgent.DEFAULT_CONFIGURATION_DIRECTORY
+                "The directory to read the configuration from (default: " + DnsServer.DEFAULT_CONFIGURATION_DIRECTORY
                         + ")");
         options.addOption("h", HiFiAgent.HELP_OPT, false, "Show the help");
         options.addOption("v", HiFiAgent.VERSION_OPT, false, "Display the version");
@@ -161,7 +165,7 @@ public final class BackgroundTrafficDriver {
                 final String configDirectoryStr = cmd.getOptionValue(HiFiAgent.CONFIGURATION_DIRECTORY_OPT);
                 configurationDirectory = Paths.get(configDirectoryStr);
             } else {
-                configurationDirectory = Paths.get(HiFiAgent.DEFAULT_CONFIGURATION_DIRECTORY);
+                configurationDirectory = Paths.get(DnsServer.DEFAULT_CONFIGURATION_DIRECTORY);
             }
 
             try {
@@ -347,8 +351,8 @@ public final class BackgroundTrafficDriver {
 
         final Timer stopTimer = new Timer("Background Traffic Driver stop timer", true);
 
-        // need a relative clock to be compatible with the demand files
-        final VirtualClock clock = new SimpleClock();
+        final VirtualClock globalClock = new AbsoluteClock();
+        globalClock.startClock();
 
         LOGGER.info("Waiting for start command from simulation driver");
 
@@ -362,9 +366,17 @@ public final class BackgroundTrafficDriver {
             }
         }
 
+        final long startTime = waitingForStart.getStartTime();
+        if (startTime >= 0) {
+            LOGGER.info("Waiting until {} to start", startTime);
+            globalClock.waitUntilTime(startTime);
+        }
+
         LOGGER.info("Starting background traffic driver");
 
-        clock.startClock();
+        // need a relative clock to be compatible with the demand files
+        final VirtualClock simulationClock = new SimpleClock();
+        simulationClock.startClock();
 
         long latestStop = 0;
 
@@ -379,7 +391,7 @@ public final class BackgroundTrafficDriver {
 
             LOGGER.trace("Waiting for request start time: {}", req.getStartTime());
 
-            clock.waitUntilTime(req.getStartTime());
+            simulationClock.waitUntilTime(req.getStartTime());
             LOGGER.info("Applying background traffic request: {}", req);
 
             final IperfClient client = startClient(req);
@@ -396,14 +408,14 @@ public final class BackgroundTrafficDriver {
                 }
             }, duration);
 
-            final long endTime = clock.getCurrentTime() + duration;
+            final long endTime = simulationClock.getCurrentTime() + duration;
             latestStop = Math.max(latestStop, endTime);
 
         } // while running and demand left to execute
 
         // wait until all clients are done
         LOGGER.info("Waiting for background requests to finish");
-        clock.waitUntilTime(latestStop + WAIT_FINISH_MS);
+        simulationClock.waitUntilTime(latestStop + WAIT_FINISH_MS);
 
         LOGGER.info("Background requests have finished, leaving the driver up to keep servers alive");
 
@@ -521,12 +533,13 @@ public final class BackgroundTrafficDriver {
                                 switch (req.getType()) {
                                 case START:
                                     LOGGER.trace("Got start request");
-                                    synchronized (waitingForStart) {
-                                        waitingForStart.set(false);
-                                        waitingForStart.notifyAll();
+                                    final String startResult = handleStartMessage(mapper, req);
+                                    if (null == startResult) {
+                                        resp.setStatus(SimResponseStatus.OK);
+                                    } else {
+                                        resp.setStatus(SimResponseStatus.ERROR);
+                                        resp.setMessage(startResult);
                                     }
-
-                                    resp.setStatus(SimResponseStatus.OK);
                                     break;
                                 case SHUTDOWN:
                                     resp.setStatus(SimResponseStatus.OK);
@@ -550,6 +563,15 @@ public final class BackgroundTrafficDriver {
                             if (socket.isClosed()) {
                                 running.set(false);
                             }
+                        } catch (final RuntimeException e) {
+                            if (e.getCause() instanceof IOException) {
+                                LOGGER.warn("Got IOException inside RuntimeException, likely from iter.hasNext", e);
+                                if (socket.isClosed()) {
+                                    running.set(false);
+                                }
+                            } else {
+                                throw e;
+                            }
                         }
                     } // while running
 
@@ -560,7 +582,35 @@ public final class BackgroundTrafficDriver {
                 running.set(false);
             } // log context
         }
-    }
+
+        private String handleStartMessage(final ObjectMapper mapper, final SimRequest req) {
+            final JsonNode tree = req.getPayload();
+            if (null != tree) {
+                try {
+                    final long time = mapper.treeToValue(tree, long.class);
+                    waitingForStart.setStartTime(time);
+
+                    synchronized (waitingForStart) {
+                        waitingForStart.set(false);
+                        waitingForStart.notifyAll();
+                    }
+
+                    // success
+                    return null;
+                } catch (final JsonProcessingException e) {
+                    LOGGER.error("Got error decoding topology update payload", e);
+
+                    final String error = String.format(
+                            "Got error decoding topology update payload, skipping processing of message: %s", e);
+                    return error;
+                }
+            } else {
+                LOGGER.warn("Skipping topology update with null payload");
+                return "Got null payload on topology update, ignoring";
+            }
+        }
+
+    } // class SimHandler
 
     /**
      * Simple class to track the state of waiting for start. This isn't just a
@@ -576,6 +626,16 @@ public final class BackgroundTrafficDriver {
 
         public boolean get() {
             return value;
+        }
+
+        private long startTime = -1;
+
+        public void setStartTime(final long v) {
+            startTime = v;
+        }
+
+        public long getStartTime() {
+            return startTime;
         }
     }
 

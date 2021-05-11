@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -40,9 +40,7 @@ import org.slf4j.LoggerFactory;
 import org.xbill.DNS.Record;
 import org.xbill.DNS.TextParseException;
 
-import com.bbn.map.AgentConfiguration;
 import com.bbn.map.utils.WeightedRoundRobin;
-import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * A list of weighted DNS records. All records are assumed to be for the same
@@ -66,9 +64,8 @@ public final class WeightedRecordList extends WeightedRoundRobin<WeightedCNAMERe
      *            passed to {@link #addRecord(WeightedCNAMERecord, double)} to
      *            create the object
      */
-    public WeightedRecordList(@JsonProperty("name") final String name,
-            @JsonProperty("records") final List<WeightedCNAMERecord> records) {
-        super(AgentConfiguration.getInstance().getDnsWeightPrecision());
+    public WeightedRecordList(final String name, final List<WeightedCNAMERecord> records) {
+        super();
 
         records.forEach(r -> addRecord(r, r.getWeight()));
 

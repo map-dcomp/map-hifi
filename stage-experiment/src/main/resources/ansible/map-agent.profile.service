@@ -1,0 +1,18 @@
+[Unit]
+Description=MAP Agent
+Requires=network.target
+After=network.target
+
+[Service]
+User=map
+WorkingDirectory=/var/lib/map/agent
+#ExecStart=/usr/bin/java -Xmx1G -jar /var/lib/map/agent/map-agent.jar
+ExecStart=/usr/bin/java -XX:StartFlightRecording=disk=true,maxage=1d,dumponexit=true,filename=map-agent.jfr,maxsize=1024m,settings=profile -Xmx1G -jar /var/lib/map/agent/map-agent.jar
+SuccessExitStatus=0
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=-1000
+TasksMax=infinity
+
+[Install]
+WantedBy=default.target

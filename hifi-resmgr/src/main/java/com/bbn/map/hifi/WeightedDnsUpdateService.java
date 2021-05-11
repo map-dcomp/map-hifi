@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -39,14 +39,7 @@ import java.io.Writer;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.nio.charset.Charset;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.annotation.Nonnull;
 
@@ -55,34 +48,24 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.bbn.map.appmgr.util.AppMgrUtils;
-import com.bbn.map.common.MutableApplicationManagerApi;
 import com.bbn.map.common.value.ApplicationCoordinates;
 import com.bbn.map.common.value.ApplicationSpecification;
 import com.bbn.map.dns.DNSUpdateService;
 import com.bbn.map.dns.DelegateRecord;
 import com.bbn.map.dns.DnsRecord;
 import com.bbn.map.dns.NameRecord;
-import com.bbn.map.hifi.dns.WeightedCNAMERecord;
-import com.bbn.map.hifi.dns.WeightedRecordList;
+import com.bbn.map.hifi.dns.RecordUpdateMessage;
 import com.bbn.map.hifi.dns.WeightedRecordMessageServer;
 import com.bbn.map.hifi.dns.WeightedRoundRobinResolver;
 import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.map.utils.JsonUtils;
-import com.bbn.protelis.networkresourcemanagement.ContainerParameters;
-import com.bbn.protelis.networkresourcemanagement.DnsNameIdentifier;
-import com.bbn.protelis.networkresourcemanagement.LinkAttribute;
-import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
 import com.bbn.protelis.networkresourcemanagement.NodeIdentifier;
 import com.bbn.protelis.networkresourcemanagement.RegionIdentifier;
 import com.bbn.protelis.networkresourcemanagement.ServiceIdentifier;
-import com.bbn.protelis.networkresourcemanagement.StringRegionIdentifier;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableCollection;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.AtomicDouble;
 
 /**
  * DNS update service that talks to {@link WeightedRoundRobinResolver}.
@@ -90,13 +73,29 @@ import com.google.common.util.concurrent.AtomicDouble;
  * @author jschewe
  *
  */
-public class WeightedDnsUpdateService implements DNSUpdateService {
+public abstract class WeightedDnsUpdateService implements DNSUpdateService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(WeightedDnsUpdateService.class);
 
     private final RegionIdentifier region;
+
+    /**
+     * @return the region that this service is in
+     */
+    public RegionIdentifier getRegion() {
+        return region;
+    }
+
     private final InetAddress serverAddress;
     private final Object lock = new Object();
+
+    /**
+     * 
+     * @return lock for thread-safe access to variables
+     */
+    protected final Object getLock() {
+        return lock;
+    }
 
     /**
      * 
@@ -110,79 +109,17 @@ public class WeightedDnsUpdateService implements DNSUpdateService {
         this.region = region;
     }
 
-    /** create service.map.dcomp -> service.region.map.dcomp */
-    private void addServiceToRegion(final List<WeightedRecordList> newRecords,
-            final ServiceIdentifier<?> service,
-            final int ttl) {
-        final ApplicationSpecification appSpec = AppMgrUtils.getApplicationManager()
-                .getApplicationSpecification((ApplicationCoordinates) service);
-        Objects.requireNonNull(appSpec, "Could not find application specification for: " + service);
-
-        final String fullHostname = DnsUtils.getFullyQualifiedServiceHostname(appSpec);
-
-        final String regionHostname = getServiceRegionName(service);
-
-        final WeightedCNAMERecord weightedRecord = new WeightedCNAMERecord(fullHostname, regionHostname, ttl, 1);
-        final WeightedRecordList weightedRecordList = new WeightedRecordList(fullHostname,
-                Collections.singletonList(weightedRecord));
-
-        newRecords.add(weightedRecordList);
-    }
-
     @Override
-    public boolean replaceAllRecords(final ImmutableCollection<Pair<DnsRecord, Double>> records) {
-        if (null == records) {
-            LOGGER.warn("Given a null set of DNS records, ignoring.");
-            return true;
-        }
-
-        synchronized (lock) {
-            final Map<ServiceIdentifier<?>, Map<String, AtomicDouble>> serviceRecordWeights = new HashMap<>();
-
-            // Use the minimum TTL across all of the DNS records. In MAP all of
-            // the
-            // TTLs should be the same anyway.
-            final AtomicInteger minTtl = new AtomicInteger(Integer.MAX_VALUE);
-
-            records.forEach(pair -> {
-                final DnsRecord r = pair.getLeft();
-                final double recordWeight = pair.getRight();
-                final ServiceIdentifier<?> service = r.getService();
-                final Map<String, AtomicDouble> recordWeights = serviceRecordWeights.computeIfAbsent(service,
-                        k -> new HashMap<>());
-
-                final String alias = getDestinationForRecord(r);
-                recordWeights.computeIfAbsent(alias, k -> new AtomicDouble()).addAndGet(recordWeight);
-
-                minTtl.getAndUpdate(prev -> Math.min(prev, r.getTtl()));
-            });
-
-            final List<WeightedRecordList> newRecords = new LinkedList<>();
-            serviceRecordWeights.forEach((service, recordWeights) -> {
-                addServiceToRegion(newRecords, service, minTtl.get());
-
-                final String thisRegionHostname = getServiceRegionName(service);
-
-                final WeightedRecordList weightedRecordList = new WeightedRecordList(thisRegionHostname,
-                        Collections.emptyList());
-
-                recordWeights.forEach((alias, weight) -> {
-                    final WeightedCNAMERecord weightedRecord = new WeightedCNAMERecord(thisRegionHostname, alias,
-                            minTtl.get(), weight.get());
-                    weightedRecordList.addRecord(weightedRecord, weightedRecord.getWeight());
-                });
-
-                newRecords.add(weightedRecordList);
-            });
-
-            return sendRecords(newRecords);
-        }
-    }
+    public abstract boolean replaceAllRecords(ImmutableCollection<Pair<DnsRecord, Double>> records);
 
     /**
      * Send the records to the configured DNS server.
+     * 
+     * @param message
+     *            the message to send
+     * @return true if there are no sending the records
      */
-    private boolean sendRecords(final Collection<WeightedRecordList> records) {
+    protected final boolean sendMessage(final RecordUpdateMessage message) {
         LOGGER.trace("Top of send records");
         try (Socket socket = new Socket(serverAddress, WeightedRecordMessageServer.PORT);
                 Reader reader = new InputStreamReader(socket.getInputStream(), Charset.defaultCharset());
@@ -194,7 +131,7 @@ public class WeightedDnsUpdateService implements DNSUpdateService {
                     .disable(JsonParser.Feature.AUTO_CLOSE_SOURCE).disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET);
 
             jsonMapper.writeValue(writer, WeightedRecordMessageServer.UPDATE_COMMAND);
-            jsonMapper.writeValue(writer, records);
+            jsonMapper.writeValue(writer, message);
             writer.flush();
 
             final WeightedRecordMessageServer.Reply reply = jsonMapper.readValue(reader,
@@ -214,7 +151,13 @@ public class WeightedDnsUpdateService implements DNSUpdateService {
         }
     }
 
-    private String getDestinationForRecord(final DnsRecord record) {
+    /**
+     * 
+     * @param record
+     *            the record to get the destination for
+     * @return the destination for the record
+     */
+    protected final String getDestinationForRecord(final DnsRecord record) {
         if (record instanceof NameRecord) {
             final NameRecord nameRecord = (NameRecord) record;
             return getAliasForNameRecord(nameRecord);
@@ -226,27 +169,51 @@ public class WeightedDnsUpdateService implements DNSUpdateService {
         }
     }
 
-    private String getAliasForNameRecord(final NameRecord record) {
+    /**
+     * 
+     * @param record
+     *            record to get the alias for
+     * @return the name for the node referenced
+     */
+    protected String getAliasForNameRecord(final NameRecord record) {
         final NodeIdentifier serviceNode = record.getNode();
 
         return serviceNode.getName();
     }
 
-    private String getAliasForDelegateRecord(final DelegateRecord record) {
+    /**
+     * 
+     * @param record
+     *            the record to get the alias for
+     * @return the appropriate region delegate string
+     */
+    protected String getAliasForDelegateRecord(final DelegateRecord record) {
         final ServiceIdentifier<?> service = record.getService();
         final String delegateRegionHostname = getServiceRegionName(service, record.getDelegateRegion());
 
         return delegateRegionHostname;
     }
 
-    private String getServiceRegionName(final ServiceIdentifier<?> service) {
+    /**
+     * 
+     * @param service
+     *            the service
+     * @return the hostname for the service in this region
+     */
+    protected final String getServiceRegionName(final ServiceIdentifier<?> service) {
         return getServiceRegionName(service, region);
     }
 
     /**
      * Get the FQDN of the service in the specified region.
+     * 
+     * @param service
+     *            the service to find the name for
+     * @param region
+     *            the region to get the name for
+     * @return the hostname for the service in the specified region
      */
-    private static String getServiceRegionName(final ServiceIdentifier<?> service, final RegionIdentifier region) {
+    protected static String getServiceRegionName(final ServiceIdentifier<?> service, final RegionIdentifier region) {
         final ApplicationSpecification appSpec = AppMgrUtils.getApplicationManager()
                 .getApplicationSpecification((ApplicationCoordinates) service);
         Objects.requireNonNull(appSpec, "Could not find application specification for: " + service);

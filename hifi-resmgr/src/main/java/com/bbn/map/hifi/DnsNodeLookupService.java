@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -31,19 +31,21 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 BBN_LICENSE_END*/
 package com.bbn.map.hifi;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 
 import javax.annotation.Nonnull;
 
-import org.protelis.lang.datatype.DeviceUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.bbn.map.hifi.util.DnsUtils;
 import com.bbn.protelis.networkresourcemanagement.NodeIdentifier;
 import com.bbn.protelis.networkresourcemanagement.NodeLookupService;
 
 /**
- * Lookup nodes using DNS. This allows AP to find neighbor nodes by id.
+ * Lookup nodes using DNS on the experiment network.
  * 
  * @author jschewe
  *
@@ -57,24 +59,20 @@ public class DnsNodeLookupService implements NodeLookupService {
     /**
      * 
      * @param apPort
-     *            the port that AP will use to communicate.
+     *            the port returned in
+     *            {@link #getInetAddressForNode(NodeIdentifier)}
      */
     public DnsNodeLookupService(final int apPort) {
         this.apPort = apPort;
     }
 
-    /**
-     * @param uid
-     *            must be a {@link NodeIdentifier}, otherwise null will be
-     *            returned
-     */
     @Override
-    public InetSocketAddress getInetAddressForNode(@Nonnull final DeviceUID uid) {
-        if (uid instanceof NodeIdentifier) {
-            final NodeIdentifier id = (NodeIdentifier) uid;
-            final String hostname = id.getName();
+    public InetSocketAddress getInetAddressForNode(@Nonnull final NodeIdentifier id) {
+        final String hostname = id.getName();
+        try {
+            final InetAddress address = DnsUtils.getByName(hostname);
 
-            final InetSocketAddress addr = new InetSocketAddress(hostname, apPort);
+            final InetSocketAddress addr = new InetSocketAddress(address, apPort);
 
             if (null == addr.getAddress()) {
                 LOGGER.error("Host {} cannot be found in DNS, returning null from getInetAddressForNode()", hostname);
@@ -82,8 +80,8 @@ public class DnsNodeLookupService implements NodeLookupService {
             } else {
                 return addr;
             }
-        } else {
-            LOGGER.warn("Asked to find an address for a node that is not a NodeIdentifier: " + uid);
+        } catch (final UnknownHostException e) {
+            LOGGER.error("Host {} cannot be found in DNS, returning null from getInetAddressForNode()", hostname, e);
             return null;
         }
     }

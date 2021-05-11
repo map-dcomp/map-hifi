@@ -87,3 +87,9 @@
         owner: root
         group: root
         mode: 0444       
+    - name: "Copy hosts to cache file"
+      copy:
+        src: hosts_to_cache.txt
+        dest: /etc/map
+        owner: root
+        mode: 0664

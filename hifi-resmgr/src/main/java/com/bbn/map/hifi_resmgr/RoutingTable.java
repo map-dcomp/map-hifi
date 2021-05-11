@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -43,99 +43,102 @@ import org.apache.commons.net.util.SubnetUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-
 /**
  * Contains routing information for a Linux machine.
  * 
  * @author awald
  *
  */
-public class RoutingTable
-{
+public class RoutingTable {
     private static Logger log = LogManager.getLogger(RoutingTable.class);
-    
+
     private List<RoutingTableRow> routingTableRows = new ArrayList<>();
-    
+
     /**
      * Adds a row to the routing table.
      * 
      * @param nic
-     *          the name of the network interface
+     *            the name of the network interface
      * @param destination
-     *          the IP address of the destination
+     *            the IP address of the destination
      * @param gateway
-     *          the IP address of the gateway
+     *            the IP address of the gateway
      * @param metric
-     *          the priority metric
+     *            the priority metric
      * @param mask
-     *          the mask of the destination subnet
+     *            the mask of the destination subnet
      */
-    public void addRow(String nic, String destination, String gateway, int metric, String mask)
-    {
+    public void addRow(String nic, String destination, String gateway, int metric, String mask) {
         RoutingTableRow row = new RoutingTableRow(nic, destination, gateway, metric, mask);
         routingTableRows.add(row);
         log.debug("add row: {}", row);
     }
-    
-    private Comparator<RoutingTableRow> routingComparator = new Comparator<RoutingTableRow>()
-    {
+
+    private Comparator<RoutingTableRow> routingComparator = new Comparator<RoutingTableRow>() {
         /**
-         * Compares rows a and b of the RoutingTable.
-         * Prioritizes the row with a more specific (larger) mask.
-         * If the mask sizes are the same, prioritizes the row with the smaller metric value.
+         * Compares rows a and b of the RoutingTable. Prioritizes the row with a
+         * more specific (larger) mask. If the mask sizes are the same,
+         * prioritizes the row with the smaller metric value.
          */
         @Override
-        public int compare(RoutingTableRow a, RoutingTableRow b)
-        {
+        public int compare(RoutingTableRow a, RoutingTableRow b) {
             int relativeSpecificity = a.getMaskSize() - b.getMaskSize();
-            
+
             if (relativeSpecificity != 0)
                 return relativeSpecificity;
             else
                 return b.getMetric() - a.getMetric();
         }
     };
-    
+
     /**
      * 
      * @param address
-     *          the address to find a matching NIC for
-     * @return the name of the NIC that packets destined for the given InetAddress address are routed to
+     *            the address to find a matching NIC for
+     * @return the name of the NIC that packets destined for the given
+     *         InetAddress address are routed to or null
      */
-    public String route(InetAddress address)
-    {
+    public String route(InetAddress address) {
+        return route(address.getHostAddress());
+    }
+
+    /**
+     * 
+     * @param address
+     *            the IP address to find a matching NIC for
+     * @return the name of the NIC that packets destined for the given
+     *         InetAddress address are routed to or null
+     */
+    public String route(final String address) {
         List<RoutingTableRow> routingTableRowsForAddress = routingTableRows.stream()
                 .filter(row -> row.matchesSubnet(address)).collect(Collectors.toList());
-        Optional<RoutingTableRow> selectedRoutingTableRowForAddress = 
-                routingTableRowsForAddress.stream().max(routingComparator);
-        
-        log.debug("route: address = {}, routingTableRows = {}, routingTableRowsForAddress: {}, "
-                + "selectedRoutingTableRowForAddress: {}", address, routingTableRows,
-                routingTableRowsForAddress, selectedRoutingTableRowForAddress);
-        
-        if (!selectedRoutingTableRowForAddress.isPresent())
-        {
+        Optional<RoutingTableRow> selectedRoutingTableRowForAddress = routingTableRowsForAddress.stream()
+                .max(routingComparator);
+
+        log.debug(
+                "route: address = {}, routingTableRows = {}, routingTableRowsForAddress: {}, "
+                        + "selectedRoutingTableRowForAddress: {}",
+                address, routingTableRows, routingTableRowsForAddress, selectedRoutingTableRowForAddress);
+
+        if (!selectedRoutingTableRowForAddress.isPresent()) {
             log.error("route: No NIC found for address {} in routing table with entries {}", address, routingTableRows);
+            return null;
+        } else {
+            return selectedRoutingTableRowForAddress.get().getNic();
         }
-        
-        return selectedRoutingTableRowForAddress.orElse(null).getNic();
-    }   
-    
-    
-    static final class RoutingTableRow
-    {
+    }
+
+    static final class RoutingTableRow {
         private String nic;
-        
+
         private String destination;
         private String gateway;
         private int metric;
         private String mask;
         private int maskSize;
         private SubnetUtils subnetUtils;
-        
-        
-        RoutingTableRow(String nic, String destination, String gateway, int metric, String mask)
-        {
+
+        RoutingTableRow(String nic, String destination, String gateway, int metric, String mask) {
             this.nic = nic;
             this.destination = destination;
             this.gateway = gateway;
@@ -143,91 +146,83 @@ public class RoutingTable
             this.mask = mask;
             maskSize = maskToMaskSize(mask);
             subnetUtils = new SubnetUtils(destination, mask);
+            // needed otherwise matching an address in a /32 doesn't work due to
+            // broadcast and network address
+            // https://issues.apache.org/jira/browse/NET-675
+            subnetUtils.setInclusiveHostCount(true);
         }
-        
-        boolean matchesSubnet(InetAddress address)
-        {
-            return subnetUtils.getInfo().isInRange(address.getHostAddress());
+
+        boolean matchesSubnet(final String hostAddress) {
+            final boolean result = subnetUtils.getInfo().isInRange(hostAddress);
+            log.trace("Checking if {} is in {} -> {}", hostAddress, subnetUtils.getInfo(), result);
+            return result;
         }
-        
-        private int maskToMaskSize(String mask)
-        {
+
+        private int maskToMaskSize(String mask) {
             String[] parts = mask.split(Pattern.quote("."));
-            
+
             int bits = 0;
-            
+
             for (String part : parts)
                 bits = (bits << 8) | Integer.parseInt(part);
-            
+
             int size = 0;
-            
-            while (bits != 0)
-            {
+
+            while (bits != 0) {
                 bits <<= 1;
                 size++;
             }
-            
+
             return size;
         }
 
-        public String getNic()
-        {
+        public String getNic() {
             return nic;
         }
 
-        public String getDestination()
-        {
+        public String getDestination() {
             return destination;
         }
 
-
-        public String getGateway()
-        {
+        public String getGateway() {
             return gateway;
         }
 
-
-        public int getMetric()
-        {
+        public int getMetric() {
             return metric;
         }
 
-
-        public String getMask()
-        {
+        public String getMask() {
             return mask;
         }
-        
-        public int getMaskSize()
-        {
+
+        public int getMaskSize() {
             return maskSize;
         }
 
-        public SubnetUtils getSubnetUtils()
-        {
+        public SubnetUtils getSubnetUtils() {
             return subnetUtils;
         }
-        
+
         @Override
-        public String toString()
-        {
-            return (nic + ", " + destination + ", " + gateway + ", " + metric + ", " + mask + " (size: " + getMaskSize() + ")");
+        public String toString() {
+            return (nic + ", " + destination + ", " + gateway + ", " + metric + ", " + mask + " (size: " + getMaskSize()
+                    + ")");
         }
     }
-    
+
     @Override
-    public String toString()
-    {
+    public String toString() {
         StringBuilder b = new StringBuilder();
-        
+
         b.append("NIC, Destination, Gateway, Metric, Mask");
-        
-        for (RoutingTableRow row : routingTableRows)
-        {
+
+        for (RoutingTableRow row : routingTableRows) {
             b.append("\n");
             b.append(row);
         }
-        
+
         return b.toString();
     }
+
 }

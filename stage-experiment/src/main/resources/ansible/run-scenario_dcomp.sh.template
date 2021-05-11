@@ -9,29 +9,25 @@ try() { "$@" || fatal "'$@' failed"; }
 
 mydir=$(cd "$(dirname "$0")" && pwd -L) || fatal "Unable to determine script directory"
 
-cleanup() {
-    debug "In cleanup"
-}
-trap 'cleanup' INT TERM EXIT
-
-log "Checking if you are logged in"
+log "Checking if you are logged into mergetb"
 mergetb list projects > /dev/null 2>&1
 if [ $? -ne 0  ]; then
-    fatal "You need to login to the testbed with mergetb login"
+    fatal "You need to login with mergetb login"
 fi
-log "You are logged in"
+log "You are logged into mergetb"
+
+log "Checking if you are logged into xdc"
+result=$(xdc show login | grep "Not logged in" > /dev/null)
+if [ $? -eq 0 ]; then
+    fatal "You need to login with xdc login"
+fi
+log "You are logged into xdc"
 
 auto_swap=0
 pass_args=""
 # argument parsing
 while [ $# -gt 0 ]; do
     pass_args="${pass_args} $1"
-    
-    case "$1" in
-        "--auto-swap")
-            auto_swap=1
-            ;;
-    esac
     shift
 done
 
@@ -41,24 +37,7 @@ scenario=SCENARIO_NAME
 
 output_dir=/project/map/scenario-outputs/${USER}
 
-log "Pushing topology to the experiment"
-try mergetb -p ${project} push ${experiment} "${mydir}"/dcomp-topology.py
-
-log "Realizing the scenario (reserve nodes)"
-try mergetb -p ${project} realize --accept ${experiment} ${scenario}
-
-log "Materializing the scenario"
-try mergetb -p ${project} materialize ${experiment} ${scenario}
-
-log "waiting for experiment to materialize"
-#until ! mergetb -p ${project} status ${experiment} ${scenario} | grep "false"; do sleep 1; log "--------"; log ""; done
-try mergetb -p ${project} wait ${experiment} ${scenario}
-
-
-try mergetb -p ${project} status ${experiment} ${scenario}
-
-log "Connecting network"
-try attach ${project} ${experiment} ${scenario}
+try "${mydir}"/setup_dcomp.sh
 
 log "Executing scenario"
 try mkdir -p "${output_dir}"
@@ -66,4 +45,7 @@ try mkdir -p "${output_dir}"
 output_file=${output_dir}/${project}_${experiment}_${scenario}.execute.log
 log "The execution log is being saved to ${output_file}"
 
-try "${mydir}"/execute-scenario.sh ${pass_args} --dcomptb 2>&1 | tee "${output_file}"
+log "Waiting a bit to make sure the nodes are all online"
+sleep 120
+
+try "${mydir}"/execute-scenario.sh ${pass_args} 2>&1 | tee "${output_file}"

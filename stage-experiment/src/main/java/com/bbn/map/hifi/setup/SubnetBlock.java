@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -68,13 +68,8 @@ final class SubnetBlock {
     // less 1 to avoid broadcast address
     private static final int CLIENT_MAX = MAX_OCTET_VALUE - 1;
 
-    /**
-     * The maximum number of containers that can be on an NCP.
-     */
-    public static final int MAX_CONTAINERS_PER_NCP = 4;
-
     private static final int NCP_MIN = INTER_REGION_MAX + 1;
-    private static final int NCP_MAX = UNDERLAY_MIN - MAX_CONTAINERS_PER_NCP - 1;
+    private static final int NCP_MAX = UNDERLAY_MIN - 1;
     private int nextNcp = NCP_MIN;
 
     private int nextClient = CLIENT_MIN;
@@ -156,15 +151,11 @@ final class SubnetBlock {
      */
     public Pair<InetAddress, List<InetAddress>> getNcpAddress(final int numContainers) {
         final int fourthOctet;
-        if (numContainers > MAX_CONTAINERS_PER_NCP) {
-            throw new IllegalArgumentException(
-                    "Cannot have more than " + MAX_CONTAINERS_PER_NCP + " containers on each NCP");
-        }
 
         synchronized (lock) {
-            if (nextNcp > NCP_MAX) {
-                throw new RuntimeException("Ran out of IP addresses for NCP + container connections. Second octet: " + secondOctet
-                        + " third octet: " + thirdOctet);
+            if (nextNcp + numContainers > NCP_MAX) {
+                throw new RuntimeException("Ran out of IP addresses for NCP + container connections. Second octet: "
+                        + secondOctet + " third octet: " + thirdOctet);
             }
 
             fourthOctet = nextNcp;
@@ -227,7 +218,22 @@ final class SubnetBlock {
         }
     }
 
-    private static InetAddress createAddress(final int firstOctet,
+    /**
+     * Create an IP address given the 4 octets.
+     * 
+     * @param firstOctet
+     *            the first number
+     * @param secondOctet
+     *            the second number
+     * @param thirdOctet
+     *            the third number
+     * @param fourthOctet
+     *            the fourth number
+     * @return the address
+     * @throws IllegalArgumentException
+     *             if the octet values are out of range
+     */
+    public static InetAddress createAddress(final int firstOctet,
             final int secondOctet,
             final int thirdOctet,
             final int fourthOctet) {

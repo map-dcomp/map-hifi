@@ -1,5 +1,5 @@
 #BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-# Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+# Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 # To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 # the exception of the dcop implementation identified below (see notes).
 # 
@@ -70,22 +70,18 @@ def setup_logging(
     
 def find_region_interface(region_ip):
     '''
-    @return (region_ifce, region_subnet)
+    @return [(region_ifce, region_subnet)] - multiple values means multiple interfaces have the specified IP 
     '''
 
     interfaces = map_common.get_all_interfaces()
     get_logger().debug("Found interfaces {0}".format(interfaces))
-    region_ifce = None
+    results = []
     region_subnet = None
     for (ifce, ip, subnet) in interfaces:
         if ip == region_ip:
-            region_ifce = ifce
-            region_subnet = subnet
+            results.append((ifce, subnet))
 
-    if region_ifce is None or region_subnet is None:
-        raise RuntimeError("Unable to find regional interface for {0} in {1}".format(region_ip, interfaces))
-
-    return (region_ifce, region_subnet)
+    return results
 
 def get_routes_to_replace(region_ifce):
     '''
@@ -178,7 +174,26 @@ def main(argv=None):
 
     cleanup_broken_docker()
     
-    (region_ifce, region_subnet) = find_region_interface(region_ip)
+    interface_results = find_region_interface(region_ip)
+    if len(interface_results) < 1:
+        raise RuntimeError("Unable to find regional interface for {0} in {1}".format(region_ip, interface_results))
+    elif len(interface_results) > 1:
+        get_logger().info("Found multiple interfaces with IP %s: %s", region_ip, interface_results)
+        for (ifce, subnet) in interface_results:
+            if not re.match(r'^docker\d+$', ifce):
+                get_logger().info("Removing region IP from interface %s", ifce)
+                delete_region_ip(region_ip, subnet, ifce)
+
+    # check again after cleaning up extra interfaces
+    interface_results = find_region_interface(region_ip)
+    if len(interface_results) < 1:
+        raise RuntimeError("Unable to find regional interface for %s in %s after cleanup".format(region_ip, interfaces))
+    elif len(interface_results) > 1:
+        raise RuntimeError("After cleanup found multiple interfaces with the same IP, don't know what to do: %s", interface_results)
+
+    # single element in the list
+    (region_ifce, region_subnet) = interface_results[0]
+        
     get_logger().info("Found region interface {0} subnet {1}".format(region_ifce, region_subnet))
     if re.match(r'^docker\d+$', region_ifce):
         get_logger().info("Already have a docker interface ({}) for the region, assuming networking is setup".format(region_ifce))

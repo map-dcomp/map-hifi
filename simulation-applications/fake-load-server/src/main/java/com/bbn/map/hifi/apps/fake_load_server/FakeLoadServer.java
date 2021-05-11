@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -33,13 +33,17 @@ package com.bbn.map.hifi.apps.fake_load_server;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Reader;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.net.URL;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
@@ -58,15 +62,24 @@ import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.bbn.map.appmgr.util.AppMgrUtils;
+import com.bbn.map.common.ApplicationManagerApi;
+import com.bbn.map.common.value.ApplicationCoordinates;
+import com.bbn.map.common.value.ApplicationSpecification;
+import com.bbn.map.common.value.Dependency;
+import com.bbn.map.hifi.client.FakeLoadClient;
 import com.bbn.map.hifi.util.ActiveConnectionCountWriter;
 import com.bbn.map.hifi.util.DnsUtils;
+import com.bbn.map.hifi.util.FailedRequestWriter;
 import com.bbn.map.hifi.util.SimAppUtils;
+import com.bbn.map.simulator.ClientLoad;
+import com.bbn.map.simulator.ClientSim;
+import com.bbn.map.simulator.Simulation;
+import com.bbn.map.utils.JsonUtils;
 import com.bbn.map.utils.LogExceptionHandler;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import oshi.SystemInfo;
-import oshi.hardware.CentralProcessor;
-import oshi.hardware.HardwareAbstractionLayer;
 
 /**
  * Server that generates artificial CPU load in response to client requests.
@@ -79,34 +92,86 @@ public final class FakeLoadServer {
 
     private final CSVPrinter latencyLog;
 
-    private final double physicalCores;
-
     private static final long IDLE_THREAD_TIMEOUT_MINUTES = 3;
     private final ExecutorService threadPool = new ThreadPoolExecutor(0, Integer.MAX_VALUE, IDLE_THREAD_TIMEOUT_MINUTES,
             TimeUnit.MINUTES, new SynchronousQueue<Runnable>());
 
+    private final ApplicationCoordinates executingService;
+
     /**
      * 
-     * @return the number of cores that is consistent with what the fake load
-     *         library uses to compute actual cpu load
+     * @return the service that is being executed
      */
-    private static int getPhysicalCores() {
-        final SystemInfo si = new SystemInfo();
-        final HardwareAbstractionLayer hal = si.getHardware();
-        final CentralProcessor processor = hal.getProcessor();
-        final int cpuCount = processor.getLogicalProcessorCount();
-
-        LOGGER.debug("Physical cores: {}", cpuCount);
-        return cpuCount;
+    public ApplicationCoordinates getExecutingService() {
+        return executingService;
     }
 
-    private FakeLoadServer() throws IOException {
-        this.latencyLog = new CSVPrinter(
-                Files.newBufferedWriter(
-                        SimAppUtils.CONTAINER_APP_METRICS_PATH.resolve(SimAppUtils.LATENCY_LOG_FILENAME),
-                        StandardOpenOption.CREATE_NEW),
+    private final ApplicationSpecification appSpec;
+    private final ApplicationManagerApi applicationManager;
+
+    private final FailedRequestWriter failedRequestWriter;
+
+    /**
+     * 
+     * @return used to write failed client requests
+     */
+    public FailedRequestWriter getFailedRequestWriter() {
+        return failedRequestWriter;
+    }
+
+    /**
+     * 
+     * @return the service executing, maybe null if the file is not found
+     */
+    private static ApplicationCoordinates readExecutingService() {
+        final ObjectMapper mapper = JsonUtils.getStandardMapObjectMapper();
+
+        try (Reader reader = Files
+                .newBufferedReader(SimAppUtils.CONTAINER_INSTANCE_PATH.resolve(SimAppUtils.SERVICE_FILENAME))) {
+            final ApplicationCoordinates service = mapper.readValue(reader, ApplicationCoordinates.class);
+            return service;
+        } catch (final IOException e) {
+            LOGGER.error("Error reading container service information", e);
+            return null;
+        }
+    }
+
+    private static void initializeApplicationManager() {
+        try {
+            final Path serviceConfigPath = SimAppUtils.CONTAINER_INSTANCE_PATH
+                    .resolve(Simulation.SERVICE_CONFIGURATIONS_FILENAME);
+            final Path serviceDepsPath = SimAppUtils.CONTAINER_INSTANCE_PATH
+                    .resolve(Simulation.SERVICE_DEPENDENCIES_FILENAME);
+
+            AppMgrUtils.loadApplicationManager(serviceConfigPath, serviceDepsPath);
+        } catch (final IOException e) {
+            LOGGER.error("Error initializating application manager. Dependent load will not occur", e);
+        }
+    }
+
+    private FakeLoadServer(final FailedRequestWriter failedRequestWriter) throws IOException {
+        this.failedRequestWriter = failedRequestWriter;
+        
+        final Path latencyLogPath = SimAppUtils.CONTAINER_APP_METRICS_PATH.resolve(SimAppUtils.LATENCY_LOG_FILENAME);
+        LOGGER.info("Writing latency log to {}", latencyLogPath);
+
+        this.latencyLog = new CSVPrinter(Files.newBufferedWriter(latencyLogPath, StandardOpenOption.CREATE_NEW),
                 CSVFormat.EXCEL.withHeader(SimAppUtils.SERVER_LATENCY_CSV_HEADER));
-        this.physicalCores = getPhysicalCores();
+        this.executingService = readExecutingService();
+        LOGGER.info("Executing service {}", this.executingService);
+
+        this.applicationManager = AppMgrUtils.getApplicationManager();
+        if (null != this.executingService) {
+            this.appSpec = applicationManager.getApplicationSpecification(this.executingService);
+            if (null == appSpec) {
+                LOGGER.error("Cannot find application specification for {}. Dependent load will not occur.",
+                        this.executingService);
+            }
+        } else {
+            this.appSpec = null;
+        }
+
+        LOGGER.info("Executing service {}", executingService);
     }
 
     // private static final String DEFAULT_CPU_LOAD_PER_REQUEST_OPT =
@@ -120,11 +185,6 @@ public final class FakeLoadServer {
     private static final String BASE_CPU_LOAD_OPT = "baseCpuLoad";
     private static final String BASE_MEMORY_LOAD_OPT = "baseMemoryLoad";
     private static final String HELP_OPT = "help";
-
-    /**
-     * Port that the server listens on.
-     */
-    public static final int PORT = 7000;
 
     /**
      * Print out the usage information. Does not exit, that is up to the caller.
@@ -202,7 +262,11 @@ public final class FakeLoadServer {
                 }
             }
 
-            final FakeLoadServer fakeLoadServer = new FakeLoadServer();
+            initializeApplicationManager();
+
+            final FailedRequestWriter failedRequestWriter = new FailedRequestWriter();
+
+            final FakeLoadServer fakeLoadServer = new FakeLoadServer(failedRequestWriter);
             fakeLoadServer.runServer(baseCpu, baseMemory);
 
         } catch (final IOException e) {
@@ -232,18 +296,16 @@ public final class FakeLoadServer {
         final NodeLoadExecutor nodeLoadExecutor = new NodeLoadExecutor();
 
         // start base load
-        final double scaledBaseCpu = baseCpu / physicalCores;
+        LOGGER.info("Base load for {} CPU and {}GB of memory", baseCpu, baseCpu, baseMemory);
 
-        LOGGER.info("Base load for {} CPU ({} scaled) and {}GB of memory", baseCpu, scaledBaseCpu, baseMemory);
-
-        final NodeLoadGeneration baseLoad = new NodeLoadGeneration(null, nodeLoadExecutor, scaledBaseCpu, baseMemory,
+        final NodeLoadGeneration baseLoad = new NodeLoadGeneration(null, nodeLoadExecutor, baseCpu, baseMemory,
                 Long.MAX_VALUE);
         threadPool.submit(baseLoad);
 
         // open socket to accept client requests
         try (ServerSocketChannel serverChannel = ServerSocketChannel.open()) {
             serverChannel.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-            serverChannel.bind(new InetSocketAddress(PORT));
+            serverChannel.bind(new InetSocketAddress(SimAppUtils.FAKE_LOAD_SERVER_PORT));
 
             LOGGER.info("Started fake load server on port {}.", serverChannel.getLocalAddress());
             LOGGER.info("Waiting for clients to connect...");
@@ -251,17 +313,20 @@ public final class FakeLoadServer {
             for (int client = 0; serverChannel.isOpen(); client++) {
                 final SocketChannel clientChannel = serverChannel.accept();
 
-                // create a handler to service the client that just connected
-                final ClientHandler clientHandler = new ClientHandler(latencyLog, physicalCores, numberOfClients,
-                        threadPool, clientChannel, client, nodeLoadExecutor);
+                // create a handler to service the client that just
+                // connected
+                final ClientHandler clientHandler = new ClientHandler(this, latencyLog, numberOfClients, threadPool,
+                        clientChannel, client, nodeLoadExecutor);
                 threadPool.submit(clientHandler);
             }
-        } catch (IOException e) {
-            LOGGER.error("The server is unable to open a socket on port {}.", PORT);
+        } catch (final IOException e) {
+            LOGGER.error("The server is unable to open a socket on port {}.", SimAppUtils.FAKE_LOAD_SERVER_PORT);
             System.exit(1);
         } finally {
             countWriter.stopWriting();
+            LOGGER.info("Exiting");
         }
+
     }
 
     /**
@@ -281,6 +346,51 @@ public final class FakeLoadServer {
         } catch (final IOException e) {
             LOGGER.error("Unable to read version properties", e);
             return "ERROR-READING-VERSION";
+        }
+    }
+
+    private static final DateTimeFormatter DEPENDENT_DIR_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmssSSSS");
+
+    /**
+     * Create and execute dependent requests if needed. The dependent requests
+     * will be executed in the thread pool.
+     * 
+     * @param request
+     *            the original client request
+     */
+    /* package */ void executeDependentLoad(final ClientLoad request) {
+        for (final Dependency dependency : appSpec.getDependencies()) {
+            final ClientLoad dependentRequest = ClientSim.createDependentRequest(request, dependency);
+
+            LOGGER.info("Created dependent demand {} from {}", dependentRequest, request);
+
+            final ApplicationCoordinates dependentService = dependentRequest.getService();
+            final String serviceNameForLog = dependentService.getGroup() + "." + dependentService.getArtifact() + "_"
+                    + dependentService.getVersion();
+
+            final Path logPath = SimAppUtils.CONTAINER_APP_METRICS_PATH.resolve("dependent-services")
+                    .resolve(serviceNameForLog).resolve(LocalDateTime.now().format(DEPENDENT_DIR_FORMAT));
+            try {
+                Files.createDirectories(logPath);
+            } catch (final IOException e) {
+                LOGGER.error("Unable to create directory for logging '{}': {}. Cannot execute dependent load.",
+                        dependentService, logPath, e);
+                return;
+            }
+
+            final ApplicationSpecification dependentAppSpec = applicationManager
+                    .getApplicationSpecification(dependentRequest.getService());
+            final String fullHostname = DnsUtils.getFullyQualifiedServiceHostname(dependentAppSpec);
+
+            // assume client will complete on it's own and exit
+            // keep it simple and only execute fake load clients
+            try {
+                final FakeLoadClient fakeClient = new FakeLoadClient(fullHostname, logPath, dependentRequest,
+                        threadPool);
+                threadPool.submit(fakeClient);
+            } catch (final IOException e) {
+                LOGGER.error("Unable to execute fake load client, likely an issue with the latency log path", e);
+            }
         }
     }
 }

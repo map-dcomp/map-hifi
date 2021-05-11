@@ -1,0 +1,25 @@
+/var/log/quagga/zebra.log {
+    rotate 4
+    daily
+    size 100k
+    create 640 quagga quagga
+    nodateext
+    notifempty
+    missingok
+    postrotate
+        /bin/kill -USR1 `cat /var/run/quagga/zebra.pid 2> /dev/null` 2> /dev/null || true
+    endscript
+}
+
+/var/log/quagga/ospfd.log {
+    rotate 4
+    daily
+    size 100k
+    create 640 quagga quagga
+    nodateext
+    notifempty
+    missingok
+    postrotate
+        /bin/kill -USR1 `cat /var/run/quagga/ospfd.pid 2> /dev/null` 2> /dev/null || true
+    endscript
+}

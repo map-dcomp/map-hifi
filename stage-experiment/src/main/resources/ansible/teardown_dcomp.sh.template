@@ -1,0 +1,49 @@
+#!/bin/sh
+
+debug() { ! "${log_debug-false}" || log "DEBUG: $*" >&2; }
+log() { printf '%s\n' "$*"; }
+warn() { log "WARNING: $*" >&2; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+try() { "$@" || fatal "'$@' failed"; }
+
+mydir=$(cd "$(dirname "$0")" && pwd -L) || fatal "Unable to determine script directory"
+
+log "Checking if you are logged into mergetb"
+mergetb list projects > /dev/null 2>&1
+if [ $? -ne 0  ]; then
+    fatal "You need to login with mergetb login"
+fi
+log "You are logged into mergetb"
+
+log "Checking if you are logged into xdc"
+result=$(xdc show login | grep "Not logged in" > /dev/null)
+if [ $? -eq 0 ]; then
+    fatal "You need to login with xdc login"
+fi
+log "You are logged into xdc"
+
+project=DCOMP_PROJECT
+experiment=EXPERIMENT
+scenario=SCENARIO_NAME
+
+if mergetb wait help 2>&1 | grep free > /dev/null ; then
+    new_wait=1
+else
+    new_wait=0
+fi
+
+log "Detaching"
+try xdc detach
+
+log "Freeing the experiment"
+try mergetb -p ${project} free ${experiment} ${scenario}
+
+log "An error about the materialization not existing here is ok. This means it cleaned up already."
+if [ ${new_wait} -eq 1 ]; then
+    mergetb -p ${project} wait free ${experiment} ${scenario}
+else
+    mergetb -p ${project} wait ${experiment} ${scenario}
+fi
+
+log "You will need to wait until the materialization is completely cleared before using the same scenario name again"

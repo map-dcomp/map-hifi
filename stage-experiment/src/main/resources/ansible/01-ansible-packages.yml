@@ -2,11 +2,12 @@
 - hosts: all
   become: yes
   tasks:
-    - name: install packages that helps ansible function
+    - name: install packages that help ansible function
       apt:
         update_cache: yes
-        name: "{{ packages }}"
-      vars:
-        packages:
-        - acl
-        - python3
+        name:
+          - acl
+          - python3
+      register: result
+      until: result is not failed
+      retries: 10

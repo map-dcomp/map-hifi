@@ -1,7 +1,6 @@
 ---
 - hosts: all
   become: yes
-
   # don't try and gather facts until python is installed
   gather_facts: False
 
@@ -11,32 +10,42 @@
     - setup:
 
   tasks:
-    - name: install packages
+    # do this before any other apt calls.
+    - name: Tell apt about DCOMP local apt cache
+      copy:
+        content: 'Acquire::http::Proxy "http://172.22.0.1:3142"; # apt-cacher-ng'
+        dest: /etc/apt/apt.conf.d/00aptproxy
+        owner: root
+        mode: 0664
+      
+    - name: install base packages
       apt:
         update_cache: yes
-        name: "{{ packages }}"
-      vars:
-        packages:
-        - kmod
-        - default-jre-headless
-        - iftop
-        - quagga-ospfd
-        - rsync
-        - xz-utils
-        - python3
-        - bridge-utils
-        - socat
-        - tshark
-        - bind9-host
-          
+        name:
+          - kmod
+          - default-jre-headless
+          - iftop
+          - quagga-ospfd
+          - rsync
+          - xz-utils
+          - python3
+          - bridge-utils
+          - socat
+          - tshark
+          - bind9-host
+          - dnsutils
+      register: result
+      until: result is not failed
+      retries: 10
+
     - name: install sysctl ip_forwarding config
       copy:
-        src: 99-ip_forwarding.conf
+        content: 'net.ipv4.ip_forward = 1'
         dest: /etc/sysctl.d/99-ip_forwarding.conf
         owner: root
         mode: 0664
         
-    - name: "enable ip forwarding"
+    - name: enable ip forwarding
       command: sysctl -w net.ipv4.ip_forward=1
 
     - name: Add map user with sudo privileges
@@ -59,22 +68,10 @@
 - hosts: ncps:clients
   become: yes
   tasks:
-    - name: install packages
+    - name: install docker packages
       apt:
-        update_cache: yes
-        name: "{{ packages }}"
-      vars:
-        packages:
-        - docker.io
-
-    - name: Give map user access to docker
-      user:
-        name: map
-        groups: docker
-        append: yes
-        
-    - name: restart docker
-      systemd:
-        name: docker
-        state: restarted
-        
+        name:
+          - docker.io
+      register: result
+      until: result is not failed
+      retries: 10

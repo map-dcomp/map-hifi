@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -38,6 +38,9 @@ import java.io.Writer;
 import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Properties;
 
 import org.apache.commons.cli.CommandLine;
@@ -49,6 +52,8 @@ import org.apache.commons.cli.ParseException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.bbn.map.AgentConfiguration;
+import com.bbn.map.hifi.util.DnsUtils;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -66,6 +71,14 @@ public final class DnsServer {
     }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DnsServer.class);
+    /**
+     * File to read the agent configuration from.
+     */
+    public static final String AGENT_CONFIGURATION_FILENAME = "agent-configuration.json";
+    /**
+     * Default directory to find configuration files in.
+     */
+    public static final String DEFAULT_CONFIGURATION_DIRECTORY = "/etc/map";
 
     private DnsServer() {
     }
@@ -84,10 +97,26 @@ public final class DnsServer {
     public static void main(final String[] args) {
         LOGGER.info("DNS server built from git version {}", getGitVersionInformation());
 
+        DnsUtils.configureDnsCache();
+
         final Options options = new Options();
         options.addOption(null, SHUTDOWN_OPT, false, "Shutdown the server running on localhost");
         options.addOption(null, CONFIG_OPT, true, "Configuration file (default: conf/config.xml)");
         options.addOption(null, FLUSH_LOGS_OPT, false, "Flush the weighted DNS logs to disk");
+
+        // DnsServer runs on a node that has an agent, so the agent
+        // configuration file will be present
+        final Path configurationDirectory = Paths.get(DEFAULT_CONFIGURATION_DIRECTORY);
+        final Path agentConfigFile = configurationDirectory.resolve(DnsServer.AGENT_CONFIGURATION_FILENAME);
+        if (Files.exists(agentConfigFile)) {
+            try {
+                AgentConfiguration.readFromFile(agentConfigFile);
+            } catch (final IOException e) {
+                LOGGER.error("Got error reading agent configuration, using defaults", e);
+            }
+        } else {
+            LOGGER.warn("Cannot find agent configuration in {}, using defaults", agentConfigFile);
+        }
 
         final CommandLineParser parser = new DefaultParser();
         try {

@@ -2,7 +2,8 @@
 - hosts: all
   become: yes
   tasks:
-    - name: start service
+    - name: start system stats service
       systemd:
         name: map_system_stats
         state: started
+        enabled: yes

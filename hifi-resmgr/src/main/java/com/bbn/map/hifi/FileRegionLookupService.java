@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -33,6 +33,9 @@ package com.bbn.map.hifi;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 
 import javax.annotation.Nonnull;
@@ -60,6 +63,13 @@ public final class FileRegionLookupService implements RegionLookupService {
     private static final Logger LOGGER = LoggerFactory.getLogger(FileRegionLookupService.class);
 
     private final ImmutableMap<SubnetUtils.SubnetInfo, RegionIdentifier> subnetToRegion;
+    private static final int UNKNOWN_REGION_CACHE_SIZE = 3000;
+    private final UnknownRegionCache unknownRegionCache = new UnknownRegionCache(UNKNOWN_REGION_CACHE_SIZE);
+
+    private static final int REGION_CACHE_SIZE = UNKNOWN_REGION_CACHE_SIZE;
+    private final IpRegionCache ipRegionCache = new IpRegionCache(REGION_CACHE_SIZE);
+
+    private final NodeRegionCache nodeRegionCache = new NodeRegionCache(REGION_CACHE_SIZE);
 
     /**
      * @param subnetToRegion
@@ -70,24 +80,47 @@ public final class FileRegionLookupService implements RegionLookupService {
     }
 
     @Override
+    @Nonnull
     public RegionIdentifier getRegionForNode(@Nonnull final NodeIdentifier nodeId) {
+        if (NodeIdentifier.UNKNOWN.equals(nodeId)) {
+            return RegionIdentifier.UNKNOWN;
+        }
+
+        final RegionIdentifier cachedRegionForNode = nodeRegionCache.get(nodeId);
+        if (null != cachedRegionForNode) {
+            return cachedRegionForNode;
+        }
+
         final NodeIdentifier canonicalId = IdentifierUtils.getCanonicalIdentifier(nodeId);
+        final RegionIdentifier cachedRegionForCanonical = nodeRegionCache.get(canonicalId);
+        if (null != cachedRegionForCanonical) {
+            return cachedRegionForCanonical;
+        }
 
         final String name = canonicalId.getName();
         if (NodeIdentifier.UNKNOWN.equals(canonicalId)) {
             return RegionIdentifier.UNKNOWN;
         } else if (name.startsWith("[")) {
             LOGGER.trace("Ignoring bogus node names from simple docker resource manager network management: " + name);
-            return RegionIdentifier.UNKNOWN;
+            final RegionIdentifier region = RegionIdentifier.UNKNOWN;
+            nodeRegionCache.put(nodeId, region);
+            nodeRegionCache.put(canonicalId, region);
+            return region;
         } else {
             try {
                 final String ipAddr = DnsUtils.getPrimaryIp(name);
                 LOGGER.trace("Converted node id {} to ip {}", name, ipAddr);
 
-                return getRegionForIp(ipAddr);
-
+                final RegionIdentifier region = getRegionForIp(ipAddr);
+                nodeRegionCache.put(nodeId, region);
+                nodeRegionCache.put(canonicalId, region);
+                return region;
             } catch (final UnknownHostException e) {
-                LOGGER.error("Error looking up address: {}, returning null region", canonicalId.getName(), e);
+                if (unknownRegionCache.add(canonicalId.getName())) {
+                    // only log if we haven't logged it recently
+                    LOGGER.error("Error looking up address: {}, returning UNKNOWN region", canonicalId.getName(), e);
+                }
+                // don't cache as this may be a temporary state
                 return RegionIdentifier.UNKNOWN;
             }
         }
@@ -122,24 +155,96 @@ public final class FileRegionLookupService implements RegionLookupService {
      */
     public RegionIdentifier getRegionForIp(final String ipAddr) {
         try {
+            final RegionIdentifier cachedRegionForIp = ipRegionCache.get(ipAddr);
+            if (null != cachedRegionForIp) {
+                return cachedRegionForIp;
+            }
+
             final String primaryIp = getPrimaryIp(ipAddr);
+            final RegionIdentifier cachedRegionForPrimary = ipRegionCache.get(primaryIp);
+            if (null != cachedRegionForPrimary) {
+                return cachedRegionForPrimary;
+            }
 
             final Map.Entry<SubnetUtils.SubnetInfo, RegionIdentifier> entry = subnetToRegion.entrySet().stream()
                     .filter(e -> e.getKey().isInRange(primaryIp)).findFirst().orElse(null);
+            final RegionIdentifier region;
             if (null == entry) {
                 if (isMulticastAddress(primaryIp)) {
                     // multicast addresses typically don't have regions
                     LOGGER.trace("No region for multicast address {}", ipAddr);
                 } else {
-                    LOGGER.error("Could not find region for {}", ipAddr);
+                    LOGGER.error("Could not find region for {} or {}", ipAddr, primaryIp);
                 }
-                return null;
+                region = RegionIdentifier.UNKNOWN;
             } else {
-                return entry.getValue();
+                region = entry.getValue();
             }
+            ipRegionCache.put(ipAddr, region);
+            ipRegionCache.put(primaryIp, region);
+            return region;
         } catch (final IllegalArgumentException e) {
-            LOGGER.warn("Invalid IP address {}. Returning null as the region.", ipAddr);
-            return null;
+            LOGGER.warn("Invalid IP address {}. Returning UNKNOWN as the region.", ipAddr);
+            return RegionIdentifier.UNKNOWN;
+        }
+    }
+
+    private static final class UnknownRegionCache extends LinkedHashSet<String> {
+        private static final long serialVersionUID = 1L;
+
+        private final int cacheSize;
+
+        /**
+         * @param cacheSize
+         *            size of the cache
+         */
+        UnknownRegionCache(final int cacheSize) {
+            this.cacheSize = cacheSize;
+        }
+
+        @Override
+        public boolean add(final String e) {
+            final Iterator<String> it = this.iterator();
+            while (size() >= this.cacheSize) {
+                it.next();
+                it.remove();
+            }
+            return super.add(e);
+        }
+
+    }
+
+    private static final class NodeRegionCache extends LinkedHashMap<NodeIdentifier, RegionIdentifier> {
+        private static final long serialVersionUID = 1L;
+
+        private final int cacheSize;
+        private static final float LOAD_FACTOR = 0.75f;
+
+        NodeRegionCache(final int cacheSize) {
+            super(cacheSize, LOAD_FACTOR, true);
+            this.cacheSize = cacheSize;
+        }
+
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<NodeIdentifier, RegionIdentifier> eldest) {
+            return size() > this.cacheSize;
+        }
+    }
+
+    private static final class IpRegionCache extends LinkedHashMap<String, RegionIdentifier> {
+        private static final long serialVersionUID = 1L;
+
+        private final int cacheSize;
+        private static final float LOAD_FACTOR = 0.75f;
+
+        IpRegionCache(final int cacheSize) {
+            super(cacheSize, LOAD_FACTOR, true);
+            this.cacheSize = cacheSize;
+        }
+
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, RegionIdentifier> eldest) {
+            return size() > this.cacheSize;
         }
     }
 }

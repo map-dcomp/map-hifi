@@ -68,4 +68,22 @@ shadowJar {
     // for some reason including the Log4j2 dat file causes problems
     // excluding the file causes log4j4 to scan for plugins and everything works 
     exclude 'META-INF/org/apache/logging/log4j/core/config/plugins/Log4j2Plugins.dat'
- }
+    
+    from "build/iftop"
+}
+
+task iftopTar(type: Tar) {
+    destinationDir  file('build/iftop')
+    compression = Compression.GZIP
+    archiveName = 'iftop.tar.gz'
+
+    into('iftop') {
+        from "iftop"
+    }
+}
+shadowJar.dependsOn(iftopTar)
+jar.dependsOn(iftopTar)
+
+jar {
+    from "build/iftop"
+}

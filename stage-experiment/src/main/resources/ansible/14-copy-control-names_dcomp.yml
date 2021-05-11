@@ -1,0 +1,9 @@
+- hosts: ncps
+  become: yes
+  tasks:
+    - name: Copy control network assignments (DCOMP)
+      copy:
+        src: hosts.dcomp
+        dest: /etc/map/node_control_names
+        owner: root
+        mode: 0444       

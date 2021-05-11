@@ -1,0 +1,7 @@
+- hosts: clients
+  become: yes
+  tasks:
+    - name: Copy Flink traces (DCOMP)
+      ansible.posix.synchronize:
+        src: /project/map/flink/
+        dest: /var/lib/map/client/flink

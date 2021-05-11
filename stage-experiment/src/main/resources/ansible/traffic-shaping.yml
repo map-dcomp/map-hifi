@@ -1,0 +1,11 @@
+---
+- hosts: ncps
+  become: yes
+  tasks:
+    - name: "Copy traffic shaping script to node"
+      copy:
+        src: prioritize_c2_traffic.py
+        dest: /etc/map/prioritize_c2_traffic.py
+        mode: 0755
+    - name: "Execute traffic shaping script"
+      command: /etc/map/prioritize_c2_traffic.py

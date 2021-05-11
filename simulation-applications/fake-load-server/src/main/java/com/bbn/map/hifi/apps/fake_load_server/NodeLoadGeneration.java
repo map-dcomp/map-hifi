@@ -1,5 +1,5 @@
 /*BBN_LICENSE_START -- DO NOT MODIFY BETWEEN LICENSE_{START,END} Lines
-Copyright (c) <2017,2018,2019,2020>, <Raytheon BBN Technologies>
+Copyright (c) <2017,2018,2019,2020,2021>, <Raytheon BBN Technologies>
 To be applied to the DCOMP/MAP Public Source Code Release dated 2018-04-19, with
 the exception of the dcop implementation identified below (see notes).
 
@@ -31,9 +31,13 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 BBN_LICENSE_END*/
 package com.bbn.map.hifi.apps.fake_load_server;
 
+import javax.annotation.Nullable;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.bbn.map.hifi.util.SimAppUtils;
+import com.bbn.map.hifi.util.network.TrafficGenerator;
 import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
 
 /*package*/ class NodeLoadGeneration implements Runnable {
@@ -45,12 +49,13 @@ import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
     private final NodeLoadExecutor executor;
 
     private boolean successful = false;
-    private final ClientHandler clientHandler;
+
+    private final TrafficGenerator networkLoadGenerator;
 
     /**
      * 
-     * @param clientHandler
-     *            used to stop network load on an error, may be null
+     * @param networkLoadGenerator
+     *            used to stop the network traffic on a failure, can be null
      * @param executor
      *            where to execute node load
      * @param cpu
@@ -60,7 +65,7 @@ import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
      * @param duration
      *            how long
      */
-    NodeLoadGeneration(final ClientHandler clientHandler,
+    NodeLoadGeneration(final @Nullable TrafficGenerator networkLoadGenerator,
             final NodeLoadExecutor executor,
             final double cpu,
             final double memory,
@@ -69,7 +74,7 @@ import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
         this.cpu = cpu;
         this.memory = memory;
         this.duration = duration;
-        this.clientHandler = clientHandler;
+        this.networkLoadGenerator = networkLoadGenerator;
     }
 
     boolean isSuccessful() {
@@ -79,7 +84,15 @@ import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
     @Override
     public void run() {
         successful = generateNodeLoad(cpu, memory, duration);
+        if (!successful && null != networkLoadGenerator) {
+            // make sure that network traffic stops right away
+            networkLoadGenerator.sendFailure();
+            networkLoadGenerator.shutdown();
+        }
     }
+
+    private static final long MIN_RETRY_MS = 1000;
+    private static final long MAX_RETRY_MS = 3000;
 
     /**
      * Generates node load including CPU and Memory usage for a given amount of
@@ -94,16 +107,38 @@ import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
      * @return true if the load could be generated and false otherwise
      */
     private boolean generateNodeLoad(final double cpu, final double memory, final long duration) {
+        final long start = System.currentTimeMillis();
+
         try {
             this.executor.executeNodeLoad(cpu, memory, duration);
             LOGGER.info("Load generation complete.");
             return true;
         } catch (final RuntimeException e) {
-            LOGGER.error("Load generation failed.", e);
-            if (null != clientHandler) {
-                clientHandler.stopGeneration(false);
+            final long diff = System.currentTimeMillis() - start;
+            final long delayStart = SimAppUtils.getRetryDelay(MIN_RETRY_MS, MAX_RETRY_MS);
+            final long reduceDuration = delayStart + diff;
+            final long retryDuration = duration - reduceDuration;
+            LOGGER.warn("Delaying start by {} ms, reducing duration by {} ms", delayStart, reduceDuration);
+
+            if (retryDuration < 1) {
+                LOGGER.error("Retry duration is less than 1, failing request");
+                return false;
             }
-            return false;
+
+            try {
+                Thread.sleep(delayStart);
+            } catch (final InterruptedException sleepEx) {
+                LOGGER.warn("Delayed start interrupted", sleepEx);
+            }
+
+            try {
+                this.executor.executeNodeLoad(cpu, memory, retryDuration);
+                LOGGER.info("Load generation complete.");
+                return true;
+            } catch (final RuntimeException retryEx) {
+                LOGGER.error("Load generation failed.", retryEx);
+                return false;
+            }
         }
     }
 
