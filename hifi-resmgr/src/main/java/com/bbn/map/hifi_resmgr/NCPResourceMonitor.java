@@ -61,6 +61,7 @@ import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.commons.lang3.tuple.Triple;
 import org.apache.commons.net.util.SubnetUtils;
 import org.apache.commons.net.util.SubnetUtils.SubnetInfo;
 import org.apache.logging.log4j.LogManager;
@@ -81,8 +82,9 @@ import com.bbn.map.hifi.util.UnitConversions;
 import com.bbn.map.utils.MAPServices;
 import com.bbn.protelis.networkresourcemanagement.LinkAttribute;
 import com.bbn.protelis.networkresourcemanagement.NodeIdentifier;
-import com.bbn.protelis.networkresourcemanagement.NodeNetworkFlow;
 import com.bbn.protelis.networkresourcemanagement.RegionIdentifier;
+import com.bbn.protelis.networkresourcemanagement.RegionLookupService;
+import com.bbn.protelis.networkresourcemanagement.RegionNetworkFlow;
 import com.bbn.protelis.networkresourcemanagement.ResourceReport;
 import com.bbn.protelis.networkresourcemanagement.ServiceIdentifier;
 import com.google.common.collect.ImmutableCollection;
@@ -161,9 +163,11 @@ public class NCPResourceMonitor {
 
     private final FileRegionLookupService regionLookupService;
 
-    private final RegionIdentifier region;
+    private final Controller node;
 
     private final int apPort;
+
+    private final SimpleDockerResourceManager resourceManager;
 
     /**
      * Stores the current and previous usage for a certain NIC.
@@ -229,24 +233,28 @@ public class NCPResourceMonitor {
      *            usage information in milliseconds
      * @param regionLookupService
      *            used to determine the region of network traffic
-     * @param region
-     *            the region of the node being monitored, used to determine
-     *            local vs. remote traffic
+     * @param node
+     *            the node being monitored, used to determine local vs. remote
+     *            traffic
      * @param apPort
      *            the port number that AP communicates on
      * @param testbedControlSubnets
      *            the subnets used by the testbed for control traffic
+     * @param resourceManager
+     *            used to get running containers
      */
     public NCPResourceMonitor(long pollingInterval,
-            @Nonnull final RegionIdentifier region,
+            @Nonnull final Controller node,
             @Nonnull final FileRegionLookupService regionLookupService,
             final int apPort,
-            @Nonnull final ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets) {
+            @Nonnull final ImmutableCollection<SubnetUtils.SubnetInfo> testbedControlSubnets,
+            @Nonnull final SimpleDockerResourceManager resourceManager) {
         this.pollingInterval = pollingInterval;
         this.regionLookupService = regionLookupService;
-        this.region = region;
+        this.node = node;
         this.apPort = apPort;
         this.testbedControlSubnets = testbedControlSubnets;
+        this.resourceManager = resourceManager;
 
         updateCPUCount(FILE_CPU_CAPACITY);
         updateNetworkBandwidth(FILE_NETWORK_CAPACITY);
@@ -459,10 +467,10 @@ public class NCPResourceMonitor {
             final RegionIdentifier address1Region = regionLookupService.getRegionForIp(address1.getHostAddress());
             final RegionIdentifier address2Region = regionLookupService.getRegionForIp(address2.getHostAddress());
 
-            if (region.equals(address1Region)) {
+            if (node.getRegion().equals(address1Region)) {
                 flip = false;
                 return trafficData1;
-            } else if (region.equals(address2Region)) {
+            } else if (node.getRegion().equals(address2Region)) {
                 // Since the traffic isn't for this host, make anything in the
                 // same region local.
                 // This makes sure that the ResourceSummary objects are correct
@@ -500,11 +508,15 @@ public class NCPResourceMonitor {
      *            the data to parse
      * @param controller
      *            used to get the service information for nodes
-     * @return the flow and service information needed for a report
+     * @param regionLookup
+     *            convert nodes to regions
+     * @return the flow and service information needed for a report, if
+     *         bandwidth should be included
      */
-    /* package */ static Pair<NodeNetworkFlow, ServiceIdentifier<?>> createNetworkFlow(final int apPort,
+    private Triple<RegionNetworkFlow, ServiceIdentifier<?>, Boolean> createNetworkFlow(final int apPort,
             @Nonnull final IftopTrafficData trafficData,
-            @Nonnull final Controller controller) {
+            @Nonnull final Controller controller,
+            @Nonnull final RegionLookupService regionLookup) {
 
         // TODO: this may be able to be done more efficiently with some rework
         // of the data flow
@@ -610,7 +622,22 @@ public class NCPResourceMonitor {
             }
         }
 
-        return Pair.of(new NodeNetworkFlow(sourceHost, destHost, serverHost), service);
+        final RegionIdentifier sourceRegion = regionLookup.getRegionForNode(sourceHost);
+        final RegionIdentifier destRegion = regionLookup.getRegionForNode(destHost);
+        final RegionIdentifier serverRegion = regionLookup.getRegionForNode(serverHost);
+
+        final boolean includeBandwidth;
+        if (sourceRegion.equals(destRegion)) {
+            // only include bandwidth if the node generating the
+            // report is running the container that is the
+            // server
+            includeBandwidth = resourceManager.getRunningContainerIDs().contains(serverHost)
+                    || node.getNodeIdentifier().equals(serverHost);
+        } else {
+            includeBandwidth = true;
+        }
+
+        return Triple.of(new RegionNetworkFlow(sourceRegion, destRegion, serverRegion), service, includeBandwidth);
     }
 
     /**
@@ -621,16 +648,16 @@ public class NCPResourceMonitor {
      * @return network information for {@link ResourceReport#getNetworkLoad()}
      *         that needs to be converted from network interface to neighbor.
      */
-    /* package */ Map<String, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> computeNetworkLoadPerNic(
+    /* package */ Map<String, Map<RegionNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> computeNetworkLoadPerNic(
             @Nonnull final Controller controller) {
         // NIC name -> flow -> service -> attribute -> value
-        final Map<String, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoad = new HashMap<>();
+        final Map<String, Map<RegionNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoad = new HashMap<>();
 
         networkMonitors.forEach((nic, monitor) -> {
             log.trace("Computing network load for {}", nic.getName());
 
             // always create the nic load map as this is expected downstream
-            final Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>> nicLoad = networkLoad
+            final Map<RegionNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>> nicLoad = networkLoad
                     .computeIfAbsent(nic.getName(), k -> new HashMap<>());
 
             gatherNetworkInformation(controller, nicToIp.get(nic), monitor, nicLoad);
@@ -656,7 +683,7 @@ public class NCPResourceMonitor {
     /* package */ void gatherNetworkInformation(final Controller controller,
             final InetAddress nicAddress,
             final BaseIftopProcessor monitor,
-            final Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>> nicLoad) {
+            final Map<RegionNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>> nicLoad) {
         final List<IftopTrafficData> trafficFrame = monitor.getLastIftopFrames();
         if (null != trafficFrame) {
 
@@ -670,26 +697,29 @@ public class NCPResourceMonitor {
 
                     log.trace("corrected traffic data {}", correctedTrafficData);
 
-                    final Pair<NodeNetworkFlow, ServiceIdentifier<?>> flowResult = createNetworkFlow(apPort,
-                            correctedTrafficData, controller);
+                    final Triple<RegionNetworkFlow, ServiceIdentifier<?>, Boolean> flowResult = createNetworkFlow(
+                            apPort, correctedTrafficData, controller, regionLookupService);
 
                     log.trace("computeNetworkLoadPerNic: flowResult: {}", flowResult);
 
-                    final NodeNetworkFlow flow = flowResult.getLeft();
-                    final ServiceIdentifier<?> service = flowResult.getRight();
+                    final RegionNetworkFlow flow = flowResult.getLeft();
+                    final ServiceIdentifier<?> service = flowResult.getMiddle();
+                    final boolean includeBandwidth = flowResult.getRight();
 
-                    final Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>> sourceLoad = nicLoad
-                            .computeIfAbsent(flow, k -> new HashMap<>());
+                    if (includeBandwidth) {
+                        final Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>> sourceLoad = nicLoad
+                                .computeIfAbsent(flow, k -> new HashMap<>());
 
-                    final long bitsSent = correctedTrafficData.getLast2sBitsSent();
-                    final double tx = UnitConversions.bitsPerSecondToMegabitsPerSecond(bitsSent);
+                        final long bitsSent = correctedTrafficData.getLast2sBitsSent();
+                        final double tx = UnitConversions.bitsPerSecondToMegabitsPerSecond(bitsSent);
 
-                    final long bitsReceived = correctedTrafficData.getLast2sBitsReceived();
-                    final double rx = UnitConversions.bitsPerSecondToMegabitsPerSecond(bitsReceived);
+                        final long bitsReceived = correctedTrafficData.getLast2sBitsReceived();
+                        final double rx = UnitConversions.bitsPerSecondToMegabitsPerSecond(bitsReceived);
 
-                    log.trace("Nic{}: Adding network load for remote machine '{}': rx = {}, tx = {}", nicAddress,
-                            flow.getDestination().getName(), rx, tx);
-                    addNetworkLoad(sourceLoad, tx, rx, service);
+                        log.trace("Nic{}: Adding network load for remote machine '{}': rx = {}, tx = {}", nicAddress,
+                                flow.getDestination().getName(), rx, tx);
+                        addNetworkLoad(sourceLoad, tx, rx, service);
+                    }
 
                 } catch (final UnknownHostException e) {
                     log.error("Unable to lookup host from traffic data: {}", e.getMessage(), e);

@@ -39,6 +39,7 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.Charset;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -87,10 +88,12 @@ public class ContainerResourceMonitor {
      */
     public ContainerResourceStats getContainerResourceStats(NodeIdentifier container) {
         log.debug("start getContainerResourceStat({})", container);
-        if (monitorThreads.containsKey(container))
-            return monitorThreads.get(container).getContainerResourceStats();
-        else
-            return null;
+        synchronized (monitorThreads) {
+            if (monitorThreads.containsKey(container))
+                return monitorThreads.get(container).getContainerResourceStats();
+            else
+                return null;
+        }
 
     }
 
@@ -100,7 +103,9 @@ public class ContainerResourceMonitor {
      *         being monitored
      */
     public Set<NodeIdentifier> getMonitoredContainerIDs() {
-        return monitorThreads.keySet();
+        synchronized (monitorThreads) {
+            return new HashSet<>(monitorThreads.keySet());
+        }
     }
 
     /**
@@ -154,20 +159,22 @@ public class ContainerResourceMonitor {
     private void startMonitorForContainer(NodeIdentifier containerID,
             String nic,
             ContainerResourceStatsHandler handler) {
-        // stops a monitor thread for the given container if one was already
-        // started
-        if (monitorThreads.containsKey(containerID)) {
-            log.info("Attempting to stop container with ID: " + containerID);
+        synchronized (monitorThreads) {
+            // stops a monitor thread for the given container if one was already
+            // started
+            if (monitorThreads.containsKey(containerID)) {
+                log.info("Attempting to stop container with ID: " + containerID);
 
-            monitorThreads.get(containerID).stopMonitor();
-            monitorThreads.remove(containerID);
+                monitorThreads.get(containerID).stopMonitor();
+                monitorThreads.remove(containerID);
+            }
+
+            // creates and starts a new monitor thread
+            ContainerMonitorThread cmt = new ContainerMonitorThread(containerID, nic);
+            cmt.setStatsHandler(handler);
+            monitorThreads.put(containerID, cmt);
+            cmt.start();
         }
-
-        // creates and starts a new monitor thread
-        ContainerMonitorThread cmt = new ContainerMonitorThread(containerID, nic);
-        cmt.setStatsHandler(handler);
-        monitorThreads.put(containerID, cmt);
-        cmt.start();
     }
 
     /**
@@ -178,13 +185,15 @@ public class ContainerResourceMonitor {
      *            monitoring
      */
     public void stopMonitorForContainer(NodeIdentifier containerID) {
-        if (monitorThreads.containsKey(containerID)) {
-            log.info("Attempting to stop container with ID: " + containerID);
+        synchronized (monitorThreads) {
+            if (monitorThreads.containsKey(containerID)) {
+                log.info("Attempting to stop container with ID: " + containerID);
 
-            monitorThreads.get(containerID).stopMonitor();
-            monitorThreads.remove(containerID);
-        } else {
-            log.error("The container with name '" + containerID + "' cannot be stopped because it does not exist.");
+                monitorThreads.get(containerID).stopMonitor();
+                monitorThreads.remove(containerID);
+            } else {
+                log.error("The container with name '" + containerID + "' cannot be stopped because it does not exist.");
+            }
         }
     }
 
@@ -359,9 +368,12 @@ public class ContainerResourceMonitor {
                     final double cpuDelta = totalUsage - preTotalUsage;
                     final double systemDelta = systemCPUUsage - preSystemCPUUsage;
                     // This is the value output by "docker stats" / 100.
-                    // Based on experimentation this value is the number of host CPUs that are busy.
-                    // So if a container is given 0.5 CPUs and it is fully busy, this value is 0.5.
-                    // This is consistent with the CPU capacity, so no more math is needed.
+                    // Based on experimentation this value is the number of host
+                    // CPUs that are busy.
+                    // So if a container is given 0.5 CPUs and it is fully busy,
+                    // this value is 0.5.
+                    // This is consistent with the CPU capacity, so no more math
+                    // is needed.
                     final double percentageOfOneHostCPU = (cpuDelta / systemDelta) * onlineCPUs;
 
                     cpus = percentageOfOneHostCPU;
@@ -383,7 +395,7 @@ public class ContainerResourceMonitor {
                 final JsonNode memoryStats = usageJsonObj.get("memory_stats");
                 if (memoryStats != null) {
                     final JsonNode usage = memoryStats.get("usage");
-                    if(null != usage) {
+                    if (null != usage) {
                         memoryUsage = usage.asLong();
                     }
                 }
@@ -394,13 +406,13 @@ public class ContainerResourceMonitor {
 
                 if (networks != null) {
                     JsonNode network = networks.get(nic);
-                    if(null != network) {
+                    if (null != network) {
                         final JsonNode rx = network.get("rx_bytes");
-                        if(null != rx) {
-                        rxBytes = rx.asLong();
+                        if (null != rx) {
+                            rxBytes = rx.asLong();
                         }
                         final JsonNode tx = network.get("rx_bytes");
-                        if(null != tx) {                        
+                        if (null != tx) {
                             txBytes = tx.asLong();
                         }
                     }

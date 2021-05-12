@@ -51,27 +51,19 @@ add it to the host mapping glob match.
       
 
 To access nodes I suggest that you create 2 ssh keys, one with a password and one without.
-Upload both public keys to the DCOMP web interface.
-The private key with the password should be in `~/.ssh/` on your local system.
-The private key without the password should be in `~/.ssh/` on the DCOMP XDCs and listed as the IdentityFile in `~/.ssh/config` on the DCOMP testbed:
+The one with the password should be added to the DCOMP testbed as the key to use to connect to the server.
+The one without can be added to your home directory on the DCOMP testbed and then add the following to ~/.ssh/config on the DCOMP testbed
     
     Host *
       IdentityFile ~/.ssh/dcomptb
 
+You will need to add the public side of this key to
+~/.ssh/authorized_keys. This allows you to connect to all of the experiment
+nodes without a password, but requires a password to connect to the DCOMP
+testbed.
 
 We should always set routing to "Manual" for dcomp so that quagga is always used.
 
-
-On the DCOMP testbed you will need to add the following to your
-`.ssh/config` due to the keys constantly changing.
-
-```
-Host *
-  IdentityFile ~/.ssh/dcomptb
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-
-```
 
 # permissions
 

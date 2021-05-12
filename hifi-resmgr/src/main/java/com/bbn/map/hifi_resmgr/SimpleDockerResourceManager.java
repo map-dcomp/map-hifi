@@ -96,8 +96,8 @@ import com.bbn.protelis.networkresourcemanagement.InterfaceIdentifier;
 import com.bbn.protelis.networkresourcemanagement.LinkAttribute;
 import com.bbn.protelis.networkresourcemanagement.NodeAttribute;
 import com.bbn.protelis.networkresourcemanagement.NodeIdentifier;
-import com.bbn.protelis.networkresourcemanagement.NodeNetworkFlow;
 import com.bbn.protelis.networkresourcemanagement.RegionIdentifier;
+import com.bbn.protelis.networkresourcemanagement.RegionNetworkFlow;
 import com.bbn.protelis.networkresourcemanagement.ResourceManager;
 import com.bbn.protelis.networkresourcemanagement.ResourceReport;
 import com.bbn.protelis.networkresourcemanagement.ResourceReport.EstimationWindow;
@@ -386,8 +386,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
         this.shortResourceReport = ResourceReport.getNullReport(node.getNodeIdentifier(), EstimationWindow.SHORT);
         this.longResourceReport = ResourceReport.getNullReport(node.getNodeIdentifier(), EstimationWindow.LONG);
 
-        ncpResourceMonitor = new NCPResourceMonitor(pollingInterval, node.getRegionIdentifier(), regionLookupService,
-                apPort, testbedControlSubnets);
+        ncpResourceMonitor = new NCPResourceMonitor(pollingInterval, node, regionLookupService, apPort,
+                testbedControlSubnets, this);
 
         // start polling and updating resource reports
         start();
@@ -657,7 +657,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
             }
 
             final MapContainer container = new MapContainer(this, service, containerId, nicName, genericNetworkCapacity,
-                    ImmutableMap.copyOf(mountMappings), containerInterface, hostMountTimeFolder, hostMountContainerAppMetricsFolder);
+                    ImmutableMap.copyOf(mountMappings), containerInterface, hostMountTimeFolder,
+                    hostMountContainerAppMetricsFolder);
 
             runningContainers.put(containerId, container);
 
@@ -796,7 +797,7 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
 
     private Map<NodeIdentifier, Double> allocatedCpus = new ConcurrentHashMap<>();
 
-    private Set<NodeIdentifier> getRunningContainerIDs() {
+    /* package */ Set<NodeIdentifier> getRunningContainerIDs() {
         return containerResourceMonitor.getMonitoredContainerIDs();
     }
 
@@ -1366,9 +1367,9 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                         interfaceIdentifiers, connectedNeighbors);
                 LOGGER.trace("Network capacities: {}", reportNetworkCapacity);
 
-                final Map<String, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoadPerNic = ncpResourceMonitor
+                final Map<String, Map<RegionNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoadPerNic = ncpResourceMonitor
                         .computeNetworkLoadPerNic(getNode());
-                final Map<InterfaceIdentifier, Map<NodeNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoadPerInterface = new HashMap<>();
+                final Map<InterfaceIdentifier, Map<RegionNetworkFlow, Map<ServiceIdentifier<?>, Map<LinkAttribute, Double>>>> networkLoadPerInterface = new HashMap<>();
                 networkLoadPerNic.forEach((nic, data) -> {
                     final InterfaceIdentifier ii = interfaceIdentifiers.get(nic);
                     if (null == ii) {
@@ -1378,15 +1379,15 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                         networkLoadPerInterface.put(ii, data);
                     }
                 });
-                final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportNetworkLoad = ImmutableUtils
+                final ImmutableMap<InterfaceIdentifier, ImmutableMap<RegionNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportNetworkLoad = ImmutableUtils
                         .makeImmutableMap4(networkLoadPerInterface);
 
                 networkDemandTracker.updateDemandValues(now, reportNetworkLoad);
 
-                final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportShortNetworkDemand = networkDemandTracker
+                final ImmutableMap<InterfaceIdentifier, ImmutableMap<RegionNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportShortNetworkDemand = networkDemandTracker
                         .computeNetworkDemand(ResourceReport.EstimationWindow.SHORT);
 
-                final ImmutableMap<InterfaceIdentifier, ImmutableMap<NodeNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportLongNetworkDemand = networkDemandTracker
+                final ImmutableMap<InterfaceIdentifier, ImmutableMap<RegionNetworkFlow, ImmutableMap<ServiceIdentifier<?>, ImmutableMap<LinkAttribute, Double>>>> reportLongNetworkDemand = networkDemandTracker
                         .computeNetworkDemand(ResourceReport.EstimationWindow.LONG);
 
                 final boolean skipNetworkData = AgentConfiguration.getInstance().getSkipNetworkData();
@@ -1850,6 +1851,9 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                 return;
             }
 
+            final RegionIdentifier containerRegion = container.getParentNode().getRegionIdentifier();
+            final RegionIdentifier clientRegion = regionLookupService.getRegionForNode(client);
+
             try {
                 container.addFailedRequest(client, serverEndTime, serverLoad, networkEndTime, networkLoad);
 
@@ -1877,8 +1881,8 @@ public class SimpleDockerResourceManager implements ResourceManager<Controller> 
                     ifce = interfaceIdentifiers.get(physicalNic);
                 }
 
-                networkDemandTracker.addFailedRequest(ifce, client, containerId, container.getService(), networkEndTime,
-                        networkLoad);
+                networkDemandTracker.addFailedRequest(ifce, clientRegion, containerRegion, container.getService(),
+                        networkEndTime, networkLoad);
             } catch (UnknownHostException e) {
                 LOGGER.error("Cannot find address for client {}, ignoring failed request", client, e);
             }
